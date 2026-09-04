@@ -12,6 +12,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from evaluation.career_workflow import evaluate_career_workflow
 from evaluation.retrieval import evaluate_retrieval
 from nanobot.knowledge.citations import render_retrieval_context
 from nanobot.knowledge.fusion import reciprocal_rank_fusion
@@ -171,7 +172,9 @@ def run(output: Path) -> dict[str, object]:
     ) as directory:
         root = Path(directory)
         cases = [*_retrieval_and_citation_cases(root), *_task_cases(root), *_fusion_cases()]
-        retrieval_benchmark = asyncio.run(evaluate_retrieval(root / "retrieval-benchmark"))
+        retrieval_benchmark, career_workflow = asyncio.run(
+            _run_async_evaluations(root)
+        )
     passed = sum(case.passed for case in cases)
     groups: dict[str, dict[str, int | float]] = {}
     for group in sorted({case.group for case in cases}):
@@ -182,19 +185,38 @@ def run(output: Path) -> dict[str, object]:
             "total": len(selected),
             "pass_rate": round(group_passed / len(selected), 4),
         }
+    career_groups = career_workflow.get("groups")
+    if not isinstance(career_groups, dict):
+        raise RuntimeError("career workflow groups are malformed")
+    groups.update(career_groups)
+    career_total = int(career_workflow["total"])
+    career_passed = int(career_workflow["passed"])
+    total = len(cases) + career_total
+    passed += career_passed
+    career_cases = career_workflow.get("cases")
+    if not isinstance(career_cases, list):
+        raise RuntimeError("career workflow cases are malformed")
     report: dict[str, object] = {
-        "suite": "omniagent-offline-baseline-v2",
+        "suite": "omniagent-offline-baseline-v3",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "total": len(cases),
+        "total": total,
         "passed": passed,
-        "pass_rate": round(passed / len(cases), 4),
+        "pass_rate": round(passed / total, 4),
         "groups": groups,
         "retrieval_benchmark": retrieval_benchmark,
-        "cases": [asdict(case) for case in cases],
+        "career_workflow": career_workflow,
+        "cases": [asdict(case) for case in cases] + career_cases,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
+
+
+async def _run_async_evaluations(root: Path) -> tuple[dict[str, object], dict[str, object]]:
+    return (
+        await evaluate_retrieval(root / "retrieval-benchmark"),
+        await evaluate_career_workflow(root / "career-workflow"),
+    )
 
 
 def main() -> None:
@@ -217,6 +239,7 @@ def main() -> None:
                     key: benchmark[key]
                     for key in ("fixture", "case_count", "k", "metrics")
                 },
+                "career_workflow": report["career_workflow"],
             },
             indent=2,
         )
