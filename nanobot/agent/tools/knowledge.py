@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -21,6 +22,11 @@ from nanobot.knowledge.embeddings import (
     OpenAICompatibleEmbeddingProvider,
 )
 from nanobot.knowledge.ingest import KnowledgeIngestionError, ingest_document
+from nanobot.knowledge.observability import (
+    RetrievalEvent,
+    RetrievalObserver,
+    log_retrieval_event,
+)
 from nanobot.knowledge.retrieval import HybridKnowledgeRetriever
 from nanobot.knowledge.store import KnowledgeStore
 
@@ -83,10 +89,12 @@ class _KnowledgeTool(Tool):
         config: KnowledgeToolsConfig,
         restrict_to_workspace: bool,
         embedding_provider: EmbeddingProvider | None = None,
+        retrieval_observer: RetrievalObserver = log_retrieval_event,
     ) -> None:
         self._workspace = workspace.expanduser().resolve(strict=False)
         self._config = config
         self._restrict_to_workspace = restrict_to_workspace
+        self._retrieval_observer = retrieval_observer
         database_path = (self._workspace / config.database_path).resolve(strict=False)
         try:
             database_path.relative_to(self._workspace)
@@ -189,9 +197,11 @@ class KnowledgeSearchTool(_KnowledgeTool):
         return True
 
     async def execute(self, query: str, limit: int | None = None) -> str:
+        started_at = time.perf_counter()
         result_limit = self._config.default_results if limit is None else limit
         if self._retriever is None:
             results = self._store.search_lexical(query, limit=result_limit)
+            self._observe("lexical", "ok", started_at, len(results), result_limit)
             return render_retrieval_context(results)
         try:
             fused = await self._retriever.search(
@@ -201,8 +211,30 @@ class KnowledgeSearchTool(_KnowledgeTool):
             )
         except EmbeddingProviderError:
             if not self._config.fallback_to_lexical:
+                self._observe("hybrid", "error", started_at, 0, result_limit)
                 return ToolResult.error("Knowledge search failed: embeddings were unavailable")
             results = self._store.search_lexical(query, limit=result_limit)
+            self._observe("lexical", "fallback", started_at, len(results), result_limit)
             context = render_retrieval_context(results)
             return "[Retrieval mode: lexical fallback]\n\n" + context
+        self._observe("hybrid", "ok", started_at, len(fused), result_limit)
         return render_retrieval_context([item.result for item in fused])
+
+    def _observe(
+        self,
+        mode: str,
+        status: str,
+        started_at: float,
+        result_count: int,
+        requested_limit: int,
+    ) -> None:
+        self._retrieval_observer(
+            RetrievalEvent(
+                mode=mode,
+                status=status,
+                latency_ms=max(0, int((time.perf_counter() - started_at) * 1_000)),
+                result_count=result_count,
+                requested_limit=requested_limit,
+                candidate_limit=self._config.candidate_results,
+            )
+        )

@@ -7,6 +7,7 @@ from nanobot.agent.tools.knowledge import (
     KnowledgeToolsConfig,
 )
 from nanobot.knowledge import EmbeddingProviderError
+from nanobot.knowledge.observability import RetrievalEvent
 
 
 class FakeEmbeddingProvider:
@@ -69,11 +70,13 @@ async def test_hybrid_tool_indexes_vectors_and_returns_semantic_evidence(tmp_pat
         restrict_to_workspace=True,
         embedding_provider=provider,
     )
+    events: list[RetrievalEvent] = []
     search = KnowledgeSearchTool(
         workspace=tmp_path,
         config=config,
         restrict_to_workspace=True,
         embedding_provider=provider,
+        retrieval_observer=events.append,
     )
 
     add_result = await add.execute("memory.md")
@@ -82,6 +85,10 @@ async def test_hybrid_tool_indexes_vectors_and_returns_semantic_evidence(tmp_pat
     assert "(hybrid)" in add_result
     assert "[K1]" in search_result
     assert "survives process restarts" in search_result
+    assert len(events) == 1
+    assert events[0].mode == "hybrid"
+    assert events[0].status == "ok"
+    assert events[0].result_count == 1
 
 
 async def test_hybrid_tool_degrades_to_lexical_when_embeddings_fail(tmp_path: Path) -> None:
@@ -99,11 +106,13 @@ async def test_hybrid_tool_degrades_to_lexical_when_embeddings_fail(tmp_path: Pa
         restrict_to_workspace=True,
         embedding_provider=provider,
     )
+    events: list[RetrievalEvent] = []
     search = KnowledgeSearchTool(
         workspace=tmp_path,
         config=config,
         restrict_to_workspace=True,
         embedding_provider=provider,
+        retrieval_observer=events.append,
     )
 
     add_result = await add.execute("memory.md")
@@ -112,6 +121,8 @@ async def test_hybrid_tool_degrades_to_lexical_when_embeddings_fail(tmp_path: Pa
     assert "lexical fallback" in add_result
     assert "[Retrieval mode: lexical fallback]" in search_result
     assert "[K1]" in search_result
+    assert events[0].mode == "lexical"
+    assert events[0].status == "fallback"
 
 
 async def test_hybrid_tool_reports_failure_when_fallback_is_disabled(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from nanobot.knowledge.embeddings import (
 from nanobot.knowledge.fusion import FusedSearchResult, reciprocal_rank_fusion
 from nanobot.knowledge.metrics import ndcg_at_k, recall_at_k, reciprocal_rank
 from nanobot.knowledge.models import KnowledgeChunk, KnowledgeSearchResult, SourceDocument
+from nanobot.knowledge.observability import RetrievalEvent, RetrievalObserver
 from nanobot.knowledge.retrieval import HybridKnowledgeRetriever
 from nanobot.knowledge.store import KnowledgeStore
 
@@ -24,6 +25,8 @@ __all__ = [
     "KnowledgeSearchResult",
     "KnowledgeStore",
     "OpenAICompatibleEmbeddingProvider",
+    "RetrievalEvent",
+    "RetrievalObserver",
     "SourceDocument",
     "chunk_document",
     "ndcg_at_k",
