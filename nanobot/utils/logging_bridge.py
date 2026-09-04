@@ -2,8 +2,19 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from loguru import logger
+
+_QUERY_CREDENTIAL_RE = re.compile(
+    r"([?&](?:access_key|access_token|api_key|authorization|client_secret|password|secret|ticket|token)=)[^&\s\]]+",
+    re.IGNORECASE,
+)
+
+
+def _redact_log_message(message: str) -> str:
+    """Remove credential values embedded in URL query strings from library logs."""
+    return _QUERY_CREDENTIAL_RE.sub(r"\1<redacted>", message)
 
 
 class _LoguruBridge(logging.Handler):
@@ -26,8 +37,9 @@ class _LoguruBridge(logging.Handler):
         frame, depth = logging.currentframe(), 2
         while frame and frame.f_code.co_filename == logging.__file__:
             frame, depth = frame.f_back, depth + 1
+        message = _redact_log_message(record.getMessage())
         logger.opt(depth=depth, exception=record.exc_info).log(
-            level, "[{lib}] {message}", lib=self.lib_name, message=record.getMessage()
+            level, "[{lib}] {message}", lib=self.lib_name, message=message
         )
 
 
