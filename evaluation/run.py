@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import tempfile
 from dataclasses import asdict, dataclass
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from evaluation.retrieval import evaluate_retrieval
 from nanobot.knowledge.citations import render_retrieval_context
 from nanobot.knowledge.fusion import reciprocal_rank_fusion
 from nanobot.knowledge.ingest import ingest_document
@@ -169,6 +171,7 @@ def run(output: Path) -> dict[str, object]:
     ) as directory:
         root = Path(directory)
         cases = [*_retrieval_and_citation_cases(root), *_task_cases(root), *_fusion_cases()]
+        retrieval_benchmark = asyncio.run(evaluate_retrieval(root / "retrieval-benchmark"))
     passed = sum(case.passed for case in cases)
     groups: dict[str, dict[str, int | float]] = {}
     for group in sorted({case.group for case in cases}):
@@ -180,12 +183,13 @@ def run(output: Path) -> dict[str, object]:
             "pass_rate": round(group_passed / len(selected), 4),
         }
     report: dict[str, object] = {
-        "suite": "omniagent-offline-baseline-v1",
+        "suite": "omniagent-offline-baseline-v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "total": len(cases),
         "passed": passed,
         "pass_rate": round(passed / len(cases), 4),
         "groups": groups,
+        "retrieval_benchmark": retrieval_benchmark,
         "cases": [asdict(case) for case in cases],
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -198,7 +202,25 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("artifacts/evaluation/latest.json"))
     args = parser.parse_args()
     report = run(args.output)
-    print(json.dumps({key: report[key] for key in ("suite", "total", "passed", "pass_rate", "groups")}, indent=2))
+    benchmark = report["retrieval_benchmark"]
+    if not isinstance(benchmark, dict):
+        raise RuntimeError("retrieval benchmark report is malformed")
+    print(
+        json.dumps(
+            {
+                "suite": report["suite"],
+                "total": report["total"],
+                "passed": report["passed"],
+                "pass_rate": report["pass_rate"],
+                "groups": report["groups"],
+                "retrieval_benchmark": {
+                    key: benchmark[key]
+                    for key in ("fixture", "case_count", "k", "metrics")
+                },
+            },
+            indent=2,
+        )
+    )
     raise SystemExit(0 if report["passed"] == report["total"] else 1)
 
 

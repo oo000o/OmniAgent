@@ -120,7 +120,10 @@ python -m evaluation.run
 pytest
 ```
 
-离线评测报告生成在 `artifacts/evaluation/latest.json`，该目录不会提交到 Git。
+离线评测报告生成在 `artifacts/evaluation/latest.json`，该目录不会提交到 Git。报告除
+60 条工程回归用例外，还会比较 BM25、向量检索和 RRF 混合检索的 Recall@3、MRR、
+NDCG@3。CI 使用透明的确定性向量夹具，不消耗线上模型额度；生产配置使用魔搭兼容
+Embedding API。
 
 更多工程说明：
 

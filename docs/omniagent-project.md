@@ -95,9 +95,11 @@ nanobot 提供通用 Agent Runtime、渠道和基础工具；OmniAgent 在其扩
 python -m evaluation.run
 ```
 
-报告保存在 `artifacts/evaluation/latest.json`。当前基线为 60 条确定性工程用例，覆盖
-检索、引用、RRF、任务幂等和错误参数拒绝。它用于回归验证，不冒充生产流量或企业
-真实数据。异步渠道重试、MCP 子进程、运行观测等能力由 pytest 集成测试覆盖。
+报告保存在 `artifacts/evaluation/latest.json`。当前基线包含 60 条确定性工程用例，覆盖
+检索、引用、RRF、任务幂等和错误参数拒绝；另有 12 条带相关性标注的查询，用于对比
+BM25、向量检索和混合 RRF 的 Recall@3、MRR、NDCG@3。确定性向量只用于让 CI
+稳定复现，不代表生产模型效果，也不冒充生产流量或企业真实数据。异步渠道重试、
+MCP 子进程、运行观测等能力由 pytest 集成测试覆盖。
 
 GitHub Actions 会自动执行评测、保存 JSON artifact，并在 Docker 镜像内再次运行
 打包后的 `omniagent-eval` 命令。
@@ -109,7 +111,7 @@ GitHub Actions 会自动执行评测、保存 JSON artifact，并在 Docker 镜�
 - [x] 重放相同幂等键不会产生重复任务。
 - [x] 定时检查触发后返回原飞书会话。
 - [x] WebUI 能查看本次运行耗时、Token、工具、重试和错误。
-- [x] `python -m evaluation.run` 达到 60/60。
+- [x] `python -m evaluation.run` 达到 60/60，并输出三种检索策略的标准指标。
 - [x] Docker 镜像以非 root 运行，并在镜像内通过 60/60 容器评测。
 - [x] 仓库发布后由 GitHub Actions 再次通过 CI 门禁（8/8 jobs）。
 

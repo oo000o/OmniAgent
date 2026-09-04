@@ -7,4 +7,8 @@ def test_offline_evaluation_has_at_least_fifty_passing_cases(tmp_path) -> None:
 
     assert report["total"] >= 50
     assert report["passed"] == report["total"]
+    benchmark = report["retrieval_benchmark"]
+    assert isinstance(benchmark, dict)
+    assert benchmark["case_count"] == 12
+    assert "hybrid_rrf" in benchmark["metrics"]
     assert output.is_file()

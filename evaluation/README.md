@@ -12,5 +12,8 @@ fixture, not a claim about production traffic. Before the final resume metrics a
 add the private/public-document release corpus and retain its source manifest.
 
 Case groups cover lexical retrieval, citation provenance, task idempotency, schema
-rejection, and rank fusion. Provider, timeout, MCP subprocess, cross-channel retry, and
-WebUI contracts remain covered by pytest because they require async/process fixtures.
+rejection, and rank fusion. The same report also compares BM25, deterministic vector
+retrieval, and hybrid RRF on 12 labelled queries using Recall@3, MRR, and NDCG@3.
+The deterministic embedding fixture makes CI reproducible and does not represent a
+production model score. Provider, timeout, MCP subprocess, cross-channel retry, and WebUI
+contracts remain covered by pytest because they require async/process fixtures.
