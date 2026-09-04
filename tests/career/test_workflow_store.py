@@ -129,7 +129,7 @@ def test_task_creation_requires_confirmation_and_real_task_ids(tmp_path) -> None
         store.transition(
             creating.workflow_id,
             CareerWorkflowTransition(
-                target_state=CareerWorkflowState.FOLLOWUP_SCHEDULED,
+                target_state=CareerWorkflowState.TASKS_CREATED,
                 checkpoint=_checkpoint(confirmed=True),
             ),
             expected_version=creating.version,

@@ -4,6 +4,7 @@ from nanobot.agent.tools.career import (
     CareerToolsConfig,
     CareerWorkflowConfirmTool,
     CareerWorkflowGetTool,
+    CareerWorkflowRecordTasksTool,
     CareerWorkflowStartTool,
     CareerWorkflowTransitionTool,
 )
@@ -19,6 +20,7 @@ from nanobot.career import (
     GapStatus,
     LearningPlanItem,
 )
+from nanobot.tasking import TaskCreate, TaskStore
 
 
 async def test_career_tools_start_replay_and_load(tmp_path) -> None:
@@ -150,3 +152,31 @@ async def test_explicit_user_confirmation_advances_displayed_plan(tmp_path) -> N
 
     assert result["state"] == CareerWorkflowState.TASKS_CREATING
     assert result["checkpoint"]["confirmed"] is True
+
+    task_store = TaskStore(database_path.parent / "tasks.db")
+    task_store.initialize()
+    task = task_store.create(
+        TaskCreate(
+            title="Learn RAG evaluation",
+            source=f"career:{current.workflow_id}:rag",
+        ),
+        idempotency_key=f"career:{current.workflow_id}:rag",
+    )
+    record = CareerWorkflowRecordTasksTool(
+        workspace=tmp_path,
+        config=CareerToolsConfig(
+            database_path="state/career.db",
+            task_database_path="state/tasks.db",
+        ),
+    )
+    recorded = json.loads(
+        await record.execute(
+            current.workflow_id,
+            json.dumps({"rag": task.task_id}),
+            result["version"],
+            "record-tasks-1",
+        )
+    )
+
+    assert recorded["state"] == CareerWorkflowState.TASKS_CREATED
+    assert recorded["checkpoint"]["task_ids"] == {"rag": task.task_id}

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from pydantic import Field, ValidationError, field_validator
@@ -22,13 +23,15 @@ from nanobot.career import (
     CareerWorkflowTransition,
 )
 from nanobot.config_base import Base
+from nanobot.tasking import TaskNotFoundError, TaskStore
 
 
 class CareerToolsConfig(Base):
     enable: bool = True
     database_path: str = Field(default=".nanobot/career.db", min_length=1)
+    task_database_path: str = Field(default=".nanobot/tasks.db", min_length=1)
 
-    @field_validator("database_path")
+    @field_validator("database_path", "task_database_path")
     @classmethod
     def database_must_be_relative(cls, value: str) -> str:
         candidate = Path(value)
@@ -61,6 +64,13 @@ class _CareerTool(Tool):
             raise ValueError("career database must stay inside the workspace") from exc
         self._store = CareerWorkflowStore(database_path)
         self._store.initialize()
+        task_database_path = (self._workspace / config.task_database_path).resolve(strict=False)
+        try:
+            task_database_path.relative_to(self._workspace)
+        except ValueError as exc:
+            raise ValueError("task database must stay inside the workspace") from exc
+        self._task_store = TaskStore(task_database_path)
+        self._task_store.initialize()
 
     def _document(self, path: str) -> Path:
         source = resolve_workspace_path(path, self._workspace, self._workspace)
@@ -185,6 +195,7 @@ class CareerWorkflowTransitionTool(_CareerTool):
         try:
             protected = {
                 CareerWorkflowState.TASKS_CREATING,
+                CareerWorkflowState.TASKS_CREATED,
                 CareerWorkflowState.FOLLOWUP_SCHEDULED,
                 CareerWorkflowState.COMPLETED,
             }
@@ -211,6 +222,83 @@ class CareerWorkflowTransitionTool(_CareerTool):
             ValueError,
         ) as exc:
             return ToolResult.error(f"Career workflow transition failed: {exc}")
+        return workflow.model_dump_json()
+
+
+@tool_parameters(
+    tool_parameters_schema(
+        workflow_id=StringSchema("Workflow awaiting verification of MCP-created tasks."),
+        task_ids_json=StringSchema(
+            "JSON object mapping every learning-plan item_id to the task_id returned by MCP.",
+            min_length=2,
+            max_length=20_000,
+        ),
+        expected_version=IntegerSchema(description="Latest workflow version.", minimum=1),
+        idempotency_key=StringSchema(
+            "Stable key for safely replaying verification.", min_length=1, max_length=200
+        ),
+        required=["workflow_id", "task_ids_json", "expected_version", "idempotency_key"],
+    )
+)
+class CareerWorkflowRecordTasksTool(_CareerTool):
+    """Accept task IDs only after verifying authoritative MCP task storage."""
+
+    @property
+    def name(self) -> str:
+        return "career_workflow_record_tasks"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Verify MCP-returned task IDs against the shared task database, then checkpoint "
+            "them. Each task source must be career:<workflow_id>:<plan_item_id>."
+        )
+
+    async def execute(
+        self,
+        workflow_id: str,
+        task_ids_json: str,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> str:
+        try:
+            raw_mapping = json.loads(task_ids_json)
+            if not isinstance(raw_mapping, dict) or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in raw_mapping.items()
+            ):
+                raise ValueError("task_ids_json must be a string-to-string JSON object")
+            task_ids: dict[str, str] = raw_mapping
+            current = self._store.get(workflow_id)
+            if current.state is not CareerWorkflowState.TASKS_CREATING:
+                raise CareerWorkflowConflictError("workflow is not creating tasks")
+            plan = {item.item_id: item for item in current.checkpoint.plan}
+            if set(task_ids) != set(plan):
+                raise ValueError("every learning-plan item must have exactly one task ID")
+            for item_id, task_id in task_ids.items():
+                task = self._task_store.get(task_id)
+                expected_source = f"career:{workflow_id}:{item_id}"
+                if task.source != expected_source:
+                    raise ValueError(f"task for plan item {item_id!r} has an invalid source")
+                if task.title != plan[item_id].title:
+                    raise ValueError(f"task for plan item {item_id!r} has an unexpected title")
+            checkpoint = current.checkpoint.model_copy(update={"task_ids": task_ids})
+            workflow = self._store.transition(
+                workflow_id,
+                CareerWorkflowTransition(
+                    target_state=CareerWorkflowState.TASKS_CREATED,
+                    checkpoint=checkpoint,
+                ),
+                expected_version=expected_version,
+                idempotency_key=idempotency_key,
+            )
+        except (
+            CareerWorkflowConflictError,
+            CareerWorkflowNotFoundError,
+            TaskNotFoundError,
+            ValueError,
+        ) as exc:
+            return ToolResult.error(f"Career task verification failed: {exc}")
         return workflow.model_dump_json()
 
 

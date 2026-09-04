@@ -14,6 +14,7 @@ class CareerWorkflowState(StrEnum):
     GAP_READY = "gap_ready"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     TASKS_CREATING = "tasks_creating"
+    TASKS_CREATED = "tasks_created"
     FOLLOWUP_SCHEDULED = "followup_scheduled"
     COMPLETED = "completed"
     FAILED = "failed"

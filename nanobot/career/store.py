@@ -41,6 +41,9 @@ _ALLOWED_TRANSITIONS: dict[CareerWorkflowState, frozenset[CareerWorkflowState]] 
         {CareerWorkflowState.TASKS_CREATING, CareerWorkflowState.FAILED}
     ),
     CareerWorkflowState.TASKS_CREATING: frozenset(
+        {CareerWorkflowState.TASKS_CREATED, CareerWorkflowState.FAILED}
+    ),
+    CareerWorkflowState.TASKS_CREATED: frozenset(
         {CareerWorkflowState.FOLLOWUP_SCHEDULED, CareerWorkflowState.FAILED}
     ),
     CareerWorkflowState.FOLLOWUP_SCHEDULED: frozenset(
@@ -54,6 +57,7 @@ _ALLOWED_TRANSITIONS: dict[CareerWorkflowState, frozenset[CareerWorkflowState]] 
             CareerWorkflowState.GAP_READY,
             CareerWorkflowState.AWAITING_CONFIRMATION,
             CareerWorkflowState.TASKS_CREATING,
+            CareerWorkflowState.TASKS_CREATED,
             CareerWorkflowState.FOLLOWUP_SCHEDULED,
         }
     ),
@@ -250,6 +254,7 @@ class CareerWorkflowStore:
             CareerWorkflowState.GAP_READY,
             CareerWorkflowState.AWAITING_CONFIRMATION,
             CareerWorkflowState.TASKS_CREATING,
+            CareerWorkflowState.TASKS_CREATED,
             CareerWorkflowState.FOLLOWUP_SCHEDULED,
             CareerWorkflowState.COMPLETED,
         } and not checkpoint.evidence:
@@ -258,6 +263,7 @@ class CareerWorkflowStore:
             CareerWorkflowState.GAP_READY,
             CareerWorkflowState.AWAITING_CONFIRMATION,
             CareerWorkflowState.TASKS_CREATING,
+            CareerWorkflowState.TASKS_CREATED,
             CareerWorkflowState.FOLLOWUP_SCHEDULED,
             CareerWorkflowState.COMPLETED,
         } and not checkpoint.gaps:
@@ -265,17 +271,20 @@ class CareerWorkflowStore:
         if state in {
             CareerWorkflowState.AWAITING_CONFIRMATION,
             CareerWorkflowState.TASKS_CREATING,
+            CareerWorkflowState.TASKS_CREATED,
             CareerWorkflowState.FOLLOWUP_SCHEDULED,
             CareerWorkflowState.COMPLETED,
         } and not checkpoint.plan:
             raise ValueError("planning workflow states require learning plan items")
         if state in {
             CareerWorkflowState.TASKS_CREATING,
+            CareerWorkflowState.TASKS_CREATED,
             CareerWorkflowState.FOLLOWUP_SCHEDULED,
             CareerWorkflowState.COMPLETED,
         } and not checkpoint.confirmed:
             raise ValueError("task creation requires user confirmation")
         if state in {
+            CareerWorkflowState.TASKS_CREATED,
             CareerWorkflowState.FOLLOWUP_SCHEDULED,
             CareerWorkflowState.COMPLETED,
         } and set(checkpoint.task_ids) != {item.item_id for item in checkpoint.plan}:
