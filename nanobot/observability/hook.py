@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
-from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
+from typing import Any
+
+from nanobot.agent.hook import (
+    AgentHook,
+    AgentHookContext,
+    AgentRunHookContext,
+    AgentTurnHookContext,
+    AgentTurnHookFactory,
+)
 from nanobot.observability.run_store import RunStore
+from nanobot.providers.base import ToolCallRequest
 
 
 class RunObservabilityHook(AgentHook):
@@ -15,9 +24,9 @@ class RunObservabilityHook(AgentHook):
     async def before_execute_tool(
         self,
         context: AgentHookContext,
-        tool_call,
-        tool,
-        params,
+        tool_call: ToolCallRequest,
+        tool: Any,
+        params: Any,
     ) -> None:
         self._store.increment_tool_calls(self._session_key)
 
@@ -28,8 +37,8 @@ class RunObservabilityHook(AgentHook):
         self._store.record_error(self._session_key, error)
 
 
-def create_run_observability_hook(store: RunStore):
-    def _factory(context):
+def create_run_observability_hook(store: RunStore) -> AgentTurnHookFactory:
+    def _factory(context: AgentTurnHookContext) -> AgentHook | None:
         if not context.session_key:
             return None
         return RunObservabilityHook(store, context.session_key)

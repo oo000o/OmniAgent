@@ -1,15 +1,25 @@
 """Standalone stdio MCP server for persistent OmniAgent tasks."""
 
+# pyright: reportUnusedFunction=false
+
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import TypeAdapter
 
 from nanobot.tasking.models import TaskCreate, TaskStatus, TaskUpdate
 from nanobot.tasking.store import TaskStore
+
+_DATETIME_ADAPTER = TypeAdapter(datetime)
+
+
+def _parse_due_at(value: str | None) -> datetime | None:
+    return None if value is None else _DATETIME_ADAPTER.validate_python(value)
 
 
 def create_server(database_path: Path) -> FastMCP:
@@ -34,7 +44,7 @@ def create_server(database_path: Path) -> FastMCP:
             title=title,
             description=description,
             priority=priority,
-            due_at=due_at,
+            due_at=_parse_due_at(due_at),
             tags=tags or [],
             source=source,
         )
@@ -74,7 +84,7 @@ def create_server(database_path: Path) -> FastMCP:
             description=description,
             status=TaskStatus(status) if status else None,
             priority=priority,
-            due_at=due_at,
+            due_at=_parse_due_at(due_at),
             clear_due_at=clear_due_at,
             tags=tags,
         )

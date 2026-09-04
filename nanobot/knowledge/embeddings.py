@@ -47,7 +47,7 @@ class OpenAICompatibleEmbeddingProvider:
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []
-        if any(not isinstance(text, str) or not text.strip() for text in texts):
+        if any(not text.strip() for text in texts):
             raise ValueError("embedding inputs must be non-empty strings")
 
         vectors: list[list[float]] = []
