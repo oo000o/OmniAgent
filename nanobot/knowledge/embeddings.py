@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAIError
+
+
+class EmbeddingProviderError(RuntimeError):
+    """Raised when an embedding backend cannot complete a request."""
 
 
 class EmbeddingProvider(Protocol):
@@ -51,21 +55,28 @@ class OpenAICompatibleEmbeddingProvider:
             raise ValueError("embedding inputs must be non-empty strings")
 
         vectors: list[list[float]] = []
-        for start in range(0, len(texts), self._batch_size):
-            batch = list(texts[start : start + self._batch_size])
-            if self._dimensions is None:
-                response = await self._client.embeddings.create(
-                    input=batch,
-                    model=self._model,
-                )
-            else:
-                response = await self._client.embeddings.create(
-                    input=batch,
-                    model=self._model,
-                    dimensions=self._dimensions,
-                )
-            ordered = sorted(response.data, key=lambda item: item.index)
-            if len(ordered) != len(batch):
-                raise RuntimeError("embedding endpoint returned an incomplete batch")
-            vectors.extend([list(item.embedding) for item in ordered])
+        try:
+            for start in range(0, len(texts), self._batch_size):
+                batch = list(texts[start : start + self._batch_size])
+                if self._dimensions is None:
+                    response = await self._client.embeddings.create(
+                        input=batch,
+                        model=self._model,
+                    )
+                else:
+                    response = await self._client.embeddings.create(
+                        input=batch,
+                        model=self._model,
+                        dimensions=self._dimensions,
+                    )
+                ordered = sorted(response.data, key=lambda item: item.index)
+                if len(ordered) != len(batch):
+                    raise EmbeddingProviderError(
+                        "embedding endpoint returned an incomplete batch"
+                    )
+                vectors.extend([list(item.embedding) for item in ordered])
+        except OpenAIError as exc:
+            raise EmbeddingProviderError(
+                f"embedding request failed: {type(exc).__name__}"
+            ) from exc
         return vectors

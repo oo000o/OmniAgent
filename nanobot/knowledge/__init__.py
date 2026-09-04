@@ -2,7 +2,11 @@
 
 from nanobot.knowledge.chunking import ChunkingConfig, chunk_document
 from nanobot.knowledge.citations import KnowledgeCitation, render_retrieval_context
-from nanobot.knowledge.embeddings import EmbeddingProvider, OpenAICompatibleEmbeddingProvider
+from nanobot.knowledge.embeddings import (
+    EmbeddingProvider,
+    EmbeddingProviderError,
+    OpenAICompatibleEmbeddingProvider,
+)
 from nanobot.knowledge.fusion import FusedSearchResult, reciprocal_rank_fusion
 from nanobot.knowledge.models import KnowledgeChunk, KnowledgeSearchResult, SourceDocument
 from nanobot.knowledge.retrieval import HybridKnowledgeRetriever
@@ -11,6 +15,7 @@ from nanobot.knowledge.store import KnowledgeStore
 __all__ = [
     "ChunkingConfig",
     "EmbeddingProvider",
+    "EmbeddingProviderError",
     "FusedSearchResult",
     "HybridKnowledgeRetriever",
     "KnowledgeChunk",

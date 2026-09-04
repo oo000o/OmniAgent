@@ -5,8 +5,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import ToolContext
@@ -14,7 +15,13 @@ from nanobot.agent.tools.path_utils import resolve_workspace_path
 from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
 from nanobot.config_base import Base
 from nanobot.knowledge.citations import render_retrieval_context
+from nanobot.knowledge.embeddings import (
+    EmbeddingProvider,
+    EmbeddingProviderError,
+    OpenAICompatibleEmbeddingProvider,
+)
 from nanobot.knowledge.ingest import KnowledgeIngestionError, ingest_document
+from nanobot.knowledge.retrieval import HybridKnowledgeRetriever
 from nanobot.knowledge.store import KnowledgeStore
 
 
@@ -24,6 +31,14 @@ class KnowledgeToolsConfig(Base):
     enable: bool = True
     database_path: str = Field(default=".nanobot/knowledge.db", min_length=1)
     default_results: int = Field(default=5, ge=1, le=20)
+    retrieval_mode: Literal["lexical", "hybrid"] = "lexical"
+    candidate_results: int = Field(default=20, ge=1, le=100)
+    embedding_model: str = ""
+    embedding_api_key: str = Field(default="", repr=False)
+    embedding_base_url: str | None = None
+    embedding_dimensions: int | None = Field(default=None, ge=1)
+    embedding_batch_size: int = Field(default=64, ge=1, le=2_048)
+    fallback_to_lexical: bool = True
 
     @field_validator("database_path")
     @classmethod
@@ -32,6 +47,14 @@ class KnowledgeToolsConfig(Base):
         if candidate.is_absolute() or ".." in candidate.parts:
             raise ValueError("database_path must stay inside the workspace")
         return value
+
+    @model_validator(mode="after")
+    def validate_retrieval_settings(self) -> KnowledgeToolsConfig:
+        if self.candidate_results < self.default_results:
+            raise ValueError("candidate_results must be at least default_results")
+        if self.retrieval_mode == "hybrid" and not self.embedding_model.strip():
+            raise ValueError("embedding_model is required when retrieval_mode is hybrid")
+        return self
 
 
 class _KnowledgeTool(Tool):
@@ -59,6 +82,7 @@ class _KnowledgeTool(Tool):
         workspace: Path,
         config: KnowledgeToolsConfig,
         restrict_to_workspace: bool,
+        embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
         self._workspace = workspace.expanduser().resolve(strict=False)
         self._config = config
@@ -70,6 +94,20 @@ class _KnowledgeTool(Tool):
             raise ValueError("knowledge database must stay inside the workspace") from exc
         self._store = KnowledgeStore(database_path)
         self._store.initialize()
+        if config.retrieval_mode == "hybrid":
+            provider = embedding_provider or OpenAICompatibleEmbeddingProvider(
+                model=config.embedding_model,
+                api_key=config.embedding_api_key,
+                base_url=config.embedding_base_url,
+                dimensions=config.embedding_dimensions,
+                batch_size=config.embedding_batch_size,
+            )
+            self._retriever: HybridKnowledgeRetriever | None = HybridKnowledgeRetriever(
+                self._store,
+                provider,
+            )
+        else:
+            self._retriever = None
 
     def _resolve_source(self, path: str) -> Path:
         allowed_dir = self._workspace if self._restrict_to_workspace else None
@@ -102,10 +140,23 @@ class KnowledgeAddTool(_KnowledgeTool):
     async def execute(self, path: str) -> str:
         try:
             source = self._resolve_source(path)
-            count = ingest_document(source, self._store)
-        except (KnowledgeIngestionError, OSError, ValueError) as exc:
+            if self._retriever is None:
+                count = ingest_document(source, self._store)
+            else:
+                try:
+                    count = await self._retriever.index_document(source)
+                except EmbeddingProviderError:
+                    if not self._config.fallback_to_lexical:
+                        raise
+                    count = ingest_document(source, self._store)
+                    return (
+                        f"Indexed {source.name!r} into {count} searchable chunks "
+                        "using lexical fallback because embeddings were unavailable."
+                    )
+        except (EmbeddingProviderError, KnowledgeIngestionError, OSError, ValueError) as exc:
             return ToolResult.error(f"Knowledge ingestion failed: {exc}")
-        return f"Indexed {source.name!r} into {count} searchable chunks."
+        mode = "hybrid" if self._retriever is not None else "lexical"
+        return f"Indexed {source.name!r} into {count} searchable chunks ({mode})."
 
 
 @tool_parameters(
@@ -139,5 +190,19 @@ class KnowledgeSearchTool(_KnowledgeTool):
 
     async def execute(self, query: str, limit: int | None = None) -> str:
         result_limit = self._config.default_results if limit is None else limit
-        results = self._store.search_lexical(query, limit=result_limit)
-        return render_retrieval_context(results)
+        if self._retriever is None:
+            results = self._store.search_lexical(query, limit=result_limit)
+            return render_retrieval_context(results)
+        try:
+            fused = await self._retriever.search(
+                query,
+                limit=result_limit,
+                candidate_limit=self._config.candidate_results,
+            )
+        except EmbeddingProviderError:
+            if not self._config.fallback_to_lexical:
+                return ToolResult.error("Knowledge search failed: embeddings were unavailable")
+            results = self._store.search_lexical(query, limit=result_limit)
+            context = render_retrieval_context(results)
+            return "[Retrieval mode: lexical fallback]\n\n" + context
+        return render_retrieval_context([item.result for item in fused])

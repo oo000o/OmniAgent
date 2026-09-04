@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from nanobot.knowledge.chunking import ChunkingConfig
-from nanobot.knowledge.embeddings import EmbeddingProvider
+from nanobot.knowledge.embeddings import EmbeddingProvider, EmbeddingProviderError
 from nanobot.knowledge.fusion import FusedSearchResult, reciprocal_rank_fusion
 from nanobot.knowledge.ingest import prepare_document
 from nanobot.knowledge.store import KnowledgeStore
@@ -31,7 +31,7 @@ class HybridKnowledgeRetriever:
         document, chunks = prepare_document(path, config=self.chunking)
         vectors = await self.embedding_provider.embed([chunk.text for chunk in chunks])
         if len(vectors) != len(chunks):
-            raise RuntimeError("embedding provider returned the wrong vector count")
+            raise EmbeddingProviderError("embedding provider returned the wrong vector count")
         self.store.replace_document(document, chunks)
         self.store.replace_embeddings(
             self.embedding_provider.model_name,
@@ -54,7 +54,9 @@ class HybridKnowledgeRetriever:
             raise ValueError("candidate_limit must be between limit and 100")
         query_vectors = await self.embedding_provider.embed([query])
         if len(query_vectors) != 1:
-            raise RuntimeError("embedding provider returned the wrong query vector count")
+            raise EmbeddingProviderError(
+                "embedding provider returned the wrong query vector count"
+            )
         lexical = self.store.search_lexical(query, limit=candidate_limit)
         semantic = self.store.search_vector(
             query_vectors[0],
