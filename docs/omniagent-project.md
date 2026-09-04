@@ -95,8 +95,9 @@ nanobot 提供通用 Agent Runtime、渠道和基础工具；OmniAgent 在其扩
 python -m evaluation.run
 ```
 
-报告保存在 `artifacts/evaluation/latest.json`。当前基线包含 60 条确定性工程用例，覆盖
-检索、引用、RRF、任务幂等和错误参数拒绝；另有 12 条带相关性标注的查询，用于对比
+报告保存在 `artifacts/evaluation/latest.json`。当前基线包含 75 条确定性工程用例，覆盖
+检索、引用、RRF、任务幂等、错误参数拒绝和可恢复求职工作流；其中 12 条带相关性标注
+的查询用于对比
 BM25、向量检索和混合 RRF 的 Recall@3、MRR、NDCG@3。确定性向量只用于让 CI
 稳定复现，不代表生产模型效果，也不冒充生产流量或企业真实数据。异步渠道重试、
 MCP 子进程、运行观测等能力由 pytest 集成测试覆盖。
@@ -115,9 +116,9 @@ GitHub Actions 会自动执行评测、保存 JSON artifact，并在 Docker 镜�
 - [x] 重放相同幂等键不会产生重复任务。
 - [x] 定时检查触发后返回原飞书会话。
 - [x] WebUI 能查看本次运行耗时、Token、工具、重试和错误。
-- [x] `python -m evaluation.run` 达到 60/60，并输出三种检索策略的标准指标。
-- [x] Docker 镜像以非 root 运行，并在镜像内通过 60/60 容器评测。
-- [x] 仓库发布后由 GitHub Actions 再次通过 CI 门禁（8/8 jobs）。
+- [x] `python -m evaluation.run` 达到 75/75，并输出三种检索策略的标准指标。
+- [x] Docker 镜像以非 root 运行，并在镜像内执行同一套容器评测。
+- [ ] 当前提交由 GitHub Actions 再次通过全部 CI 门禁。
 
 前五项中的真实飞书收发需要开发者应用凭证；离线测试使用受控替身，不把模拟结果
 描述成线上验证。
@@ -132,7 +133,7 @@ GitHub Actions
   串联为端到端工作流；使用 BM25、向量检索与 RRF 融合提升不同类型查询的召回稳定性。
 - 将任务领域封装为独立 MCP 服务，通过 Pydantic 校验、幂等键、乐观锁和高风险操作
   确认机制约束模型写操作，并提供 SQLite 持久化及分页筛选。
-- 建设运行观测与自动化质量门禁，记录耗时、Token、工具调用、重试和错误；建立 60 条
+- 建设运行观测与自动化质量门禁，记录耗时、Token、工具调用、重试和错误；建立 75 条
   可复现离线评测，并接入 pytest、Docker 与 GitHub Actions。
 
 简历只能填写已经实跑并留存证据的指标。真实飞书链路和容器 CI 未通过前，不写

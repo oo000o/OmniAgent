@@ -120,16 +120,17 @@ python -m evaluation.run
 pytest
 ```
 
-离线评测报告生成在 `artifacts/evaluation/latest.json`，该目录不会提交到 Git。报告除
-60 条工程回归用例外，还会比较 BM25、向量检索和 RRF 混合检索的 Recall@3、MRR、
-NDCG@3。CI 使用透明的确定性向量夹具，不消耗线上模型额度；生产配置使用魔搭兼容
-Embedding API。
+离线评测报告生成在 `artifacts/evaluation/latest.json`，该目录不会提交到 Git。当前
+基线包含 75 条工程回归用例，其中包括 15 条求职工作流成功、边界拒绝和恢复场景；
+报告还会比较 BM25、向量检索和 RRF 混合检索的 Recall@3、MRR、NDCG@3。CI 使用
+透明的确定性向量夹具，不消耗线上模型额度；生产配置使用魔搭兼容 Embedding API。
 
 更多工程说明：
 
 - [项目设计与验收](./docs/omniagent-project.md)
 - [任务 MCP 设计](./docs/omniagent-task-mcp.md)
 - [跨渠道工作流](./docs/omniagent-cross-channel-workflow.md)
+- [求职工作流工程设计与面试核验](./docs/career-workflow-engineering.md)
 - [评测说明](./evaluation/README.md)
 
 ## 技术栈
