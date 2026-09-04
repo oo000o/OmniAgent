@@ -1,0 +1,75 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/data/workspace",
+      "model": "Qwen/Qwen3.5-35B-A3B",
+      "provider": "modelscope",
+      "maxTokens": 8192,
+      "contextWindowTokens": 200000,
+      "temperature": 0.1,
+      "maxToolIterations": 12,
+      "timezone": "Asia/Shanghai",
+      "unifiedSession": true
+    }
+  },
+  "providers": {
+    "modelscope": {
+      "apiKey": "${MODELSCOPE_API_KEY}",
+      "apiBase": "https://api-inference.modelscope.cn/v1"
+    }
+  },
+  "channels": {
+    "sendMaxRetries": 3,
+    "websocket": {
+      "enabled": true,
+      "host": "0.0.0.0",
+      "port": 8765,
+      "tokenIssueSecret": "${NANOBOT_WEB_TOKEN}",
+      "allowFrom": ["*"]
+    },
+    "feishu": {
+      "enabled": true,
+      "appId": "${FEISHU_APP_ID}",
+      "appSecret": "${FEISHU_APP_SECRET}",
+      "domain": "feishu",
+      "groupPolicy": "mention",
+      "topicIsolation": true,
+      "allowFrom": ["${FEISHU_OPEN_ID}"]
+    }
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790,
+    "heartbeat": {
+      "enabled": true,
+      "intervalS": 1800,
+      "keepRecentMessages": 8
+    }
+  },
+  "tools": {
+    "restrictToWorkspace": true,
+    "knowledge": {
+      "enable": true,
+      "databasePath": ".nanobot/knowledge.db",
+      "defaultResults": 5
+    },
+    "mcpServers": {
+      "omniagent_tasks": {
+        "type": "stdio",
+        "command": "python",
+        "args": ["-m", "nanobot.tasking.mcp_server"],
+        "cwd": "/app",
+        "env": {
+          "OMNIAGENT_TASK_DB": "/data/tasks.db"
+        },
+        "enabledTools": [
+          "task_create",
+          "task_get",
+          "task_list",
+          "task_update",
+          "task_cancel"
+        ]
+      }
+    }
+  }
+}

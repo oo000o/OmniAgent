@@ -1,0 +1,47 @@
+{
+  "agents": {
+    "defaults": {
+      "unifiedSession": true,
+      "timezone": "Asia/Shanghai",
+      "maxToolIterations": 12
+    }
+  },
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "${FEISHU_APP_ID}",
+      "appSecret": "${FEISHU_APP_SECRET}",
+      "domain": "feishu",
+      "groupPolicy": "mention",
+      "topicIsolation": true,
+      "allowFrom": ["${FEISHU_OPEN_ID}"]
+    },
+    "sendMaxRetries": 3
+  },
+  "tools": {
+    "restrictToWorkspace": true,
+    "knowledge": {
+      "enable": true,
+      "databasePath": ".nanobot/knowledge.db",
+      "defaultResults": 5
+    },
+    "mcpServers": {
+      "omniagent_tasks": {
+        "type": "stdio",
+        "command": "python",
+        "args": ["-m", "nanobot.tasking.mcp_server"],
+        "cwd": "<PROJECT_ROOT>/source",
+        "env": {
+          "OMNIAGENT_TASK_DB": "<PROJECT_ROOT>/data/tasks.db"
+        },
+        "enabledTools": [
+          "task_create",
+          "task_get",
+          "task_list",
+          "task_update",
+          "task_cancel"
+        ]
+      }
+    }
+  }
+}
