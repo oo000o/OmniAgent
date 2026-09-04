@@ -12,6 +12,7 @@ from nanobot.config_base import Base
 from nanobot.cron.types import CronSchedule
 
 if TYPE_CHECKING:
+    from nanobot.agent.tools.career import CareerToolsConfig
     from nanobot.agent.tools.cli_apps import CliAppsToolConfig
     from nanobot.agent.tools.filesystem import FileToolsConfig
     from nanobot.agent.tools.image_generation import ImageGenerationToolConfig
@@ -410,6 +411,9 @@ class ToolsConfig(Base):
     knowledge: KnowledgeToolsConfig = Field(
         default_factory=lambda: _lazy_default("nanobot.agent.tools.knowledge", "KnowledgeToolsConfig"),
     )
+    career: CareerToolsConfig = Field(
+        default_factory=lambda: _lazy_default("nanobot.agent.tools.career", "CareerToolsConfig"),
+    )
     max_session_messages_per_minute: int = Field(default=6, ge=1)
     restrict_to_workspace: bool = False  # policy intent: keep tool access inside workspace when possible
     webui_allow_local_service_access: bool = Field(
@@ -689,6 +693,7 @@ def _resolve_tool_config_refs() -> None:
     """
     import sys
 
+    from nanobot.agent.tools.career import CareerToolsConfig
     from nanobot.agent.tools.cli_apps import CliAppsToolConfig
     from nanobot.agent.tools.filesystem import FileToolsConfig
     from nanobot.agent.tools.image_generation import ImageGenerationToolConfig
@@ -708,6 +713,7 @@ def _resolve_tool_config_refs() -> None:
     mod.MyToolConfig = MyToolConfig  # type: ignore[attr-defined]
     mod.ImageGenerationToolConfig = ImageGenerationToolConfig  # type: ignore[attr-defined]
     mod.KnowledgeToolsConfig = KnowledgeToolsConfig  # type: ignore[attr-defined]
+    mod.CareerToolsConfig = CareerToolsConfig  # type: ignore[attr-defined]
 
     ToolsConfig.model_rebuild()
     Config.model_rebuild()
@@ -720,3 +726,4 @@ try:
     _resolve_tool_config_refs()
 except ImportError:
     pass
+    from nanobot.agent.tools.career import CareerToolsConfig
