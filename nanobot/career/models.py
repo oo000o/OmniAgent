@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -30,6 +31,7 @@ class EvidenceReference(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     evidence_id: str = Field(pattern=r"^K[1-9][0-9]*$")
+    source_type: Literal["resume", "jd"]
     source_name: str = Field(min_length=1, max_length=500)
     chunk_id: str = Field(min_length=1, max_length=200)
 
@@ -40,7 +42,7 @@ class GapItem(BaseModel):
     competency: str = Field(min_length=1, max_length=200)
     status: GapStatus
     rationale: str = Field(min_length=1, max_length=2_000)
-    evidence_ids: list[str] = Field(default_factory=list, max_length=20)
+    evidence_ids: list[str] = Field(min_length=1, max_length=20)
 
 
 class LearningPlanItem(BaseModel):
@@ -76,6 +78,15 @@ class CareerCheckpoint(BaseModel):
         }
         if unknown:
             raise ValueError("gap items reference unknown evidence IDs")
+        evidence_sources = {item.evidence_id: item.source_type for item in self.evidence}
+        for gap in self.gaps:
+            sources = {evidence_sources[evidence_id] for evidence_id in gap.evidence_ids}
+            if "jd" not in sources:
+                raise ValueError("every gap item must cite JD evidence")
+            if gap.status is GapStatus.DEMONSTRATED and sources != {"resume", "jd"}:
+                raise ValueError(
+                    "demonstrated competencies must cite both resume and JD evidence"
+                )
         plan_ids = {item.item_id for item in self.plan}
         if len(plan_ids) != len(self.plan):
             raise ValueError("learning plan item IDs must be unique")

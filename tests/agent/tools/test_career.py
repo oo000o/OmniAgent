@@ -5,10 +5,12 @@ from nanobot.agent.tools.career import (
     CareerWorkflowConfirmTool,
     CareerWorkflowGetTool,
     CareerWorkflowRecordTasksTool,
+    CareerWorkflowRetrieveTool,
     CareerWorkflowStartTool,
     CareerWorkflowTransitionTool,
 )
 from nanobot.agent.tools.context import RequestContext
+from nanobot.agent.tools.knowledge import KnowledgeToolsConfig
 from nanobot.career import (
     CareerCheckpoint,
     CareerWorkflowCreate,
@@ -59,7 +61,7 @@ async def test_transition_tool_rejects_skipping_confirmation(tmp_path) -> None:
     result = await transition.execute(
         workflow["workflow_id"],
         CareerWorkflowState.GAP_READY.value,
-        """{"evidence":[{"evidence_id":"K1","source_name":"jd.md","chunk_id":"c1"}],
+        """{"evidence":[{"evidence_id":"K1","source_type":"jd","source_name":"jd.md","chunk_id":"c1"}],
         "gaps":[{"competency":"RAG","status":"missing","rationale":"No evidence",
         "evidence_ids":["K1"]}]}""",
         1,
@@ -68,6 +70,134 @@ async def test_transition_tool_rejects_skipping_confirmation(tmp_path) -> None:
 
     assert result.startswith("Career workflow transition failed:")
     assert "invalid workflow transition" in result
+
+
+async def test_retrieval_persists_only_real_resume_and_jd_chunks(tmp_path) -> None:
+    (tmp_path / "resume.md").write_text(
+        "Built Python APIs and Docker deployment automation.", encoding="utf-8"
+    )
+    (tmp_path / "jd.md").write_text(
+        "The role requires Python, RAG evaluation, and Docker.", encoding="utf-8"
+    )
+    career_config = CareerToolsConfig(database_path="state/career.db")
+    start = CareerWorkflowStartTool(workspace=tmp_path, config=career_config)
+    workflow = json.loads(await start.execute("resume.md", "jd.md", "career-evidence"))
+    retrieve = CareerWorkflowRetrieveTool(
+        workspace=tmp_path,
+        config=career_config,
+        knowledge_config=KnowledgeToolsConfig(
+            database_path="state/knowledge.db",
+            retrieval_mode="lexical",
+            candidate_results=10,
+        ),
+    )
+
+    result = json.loads(
+        await retrieve.execute(
+            workflow["workflow_id"],
+            json.dumps(["Python", "RAG evaluation", "Docker"]),
+            workflow["version"],
+            "retrieve-1",
+        )
+    )
+
+    assert result["workflow"]["state"] == CareerWorkflowState.EVIDENCE_RETRIEVED
+    assert {item["source_type"] for item in result["evidence"]} == {"resume", "jd"}
+    assert all(item["chunk_id"] for item in result["evidence"])
+    persisted = result["workflow"]["checkpoint"]["evidence"]
+    assert {item["chunk_id"] for item in persisted} == {
+        item["chunk_id"] for item in result["evidence"]
+    }
+
+    replay = json.loads(
+        await retrieve.execute(
+            workflow["workflow_id"],
+            json.dumps(["Python", "RAG evaluation", "Docker"]),
+            workflow["version"],
+            "retrieve-1",
+        )
+    )
+    assert replay["workflow"]["version"] == result["workflow"]["version"]
+
+
+async def test_retrieved_evidence_drives_gap_and_plan_checkpoints(tmp_path) -> None:
+    (tmp_path / "resume.md").write_text(
+        "Built Python APIs and Docker deployment automation.", encoding="utf-8"
+    )
+    (tmp_path / "jd.md").write_text(
+        "The role requires Python, RAG evaluation, and Docker.", encoding="utf-8"
+    )
+    config = CareerToolsConfig(database_path="state/career.db")
+    start = CareerWorkflowStartTool(workspace=tmp_path, config=config)
+    retrieve = CareerWorkflowRetrieveTool(
+        workspace=tmp_path,
+        config=config,
+        knowledge_config=KnowledgeToolsConfig(
+            database_path="state/knowledge.db", retrieval_mode="lexical"
+        ),
+    )
+    transition = CareerWorkflowTransitionTool(workspace=tmp_path, config=config)
+    workflow = json.loads(await start.execute("resume.md", "jd.md", "career-flow"))
+    retrieved = json.loads(
+        await retrieve.execute(
+            workflow["workflow_id"],
+            json.dumps(["Python Docker", "RAG evaluation"]),
+            workflow["version"],
+            "retrieve-flow",
+        )
+    )["workflow"]
+    evidence = retrieved["checkpoint"]["evidence"]
+    resume_id = next(item["evidence_id"] for item in evidence if item["source_type"] == "resume")
+    jd_id = next(item["evidence_id"] for item in evidence if item["source_type"] == "jd")
+    gap_checkpoint = {
+        **retrieved["checkpoint"],
+        "gaps": [
+            {
+                "competency": "Python and Docker",
+                "status": "demonstrated",
+                "rationale": "The resume evidence matches the JD requirement.",
+                "evidence_ids": [resume_id, jd_id],
+            },
+            {
+                "competency": "RAG evaluation",
+                "status": "missing",
+                "rationale": "The JD requires evaluation without resume evidence.",
+                "evidence_ids": [jd_id],
+            },
+        ],
+    }
+    gap_ready = json.loads(
+        await transition.execute(
+            retrieved["workflow_id"],
+            CareerWorkflowState.GAP_READY.value,
+            json.dumps(gap_checkpoint),
+            retrieved["version"],
+            "gap-flow",
+        )
+    )
+    plan_checkpoint = {
+        **gap_ready["checkpoint"],
+        "plan": [
+            {
+                "item_id": "rag-eval",
+                "title": "Build a reproducible RAG evaluation set",
+                "priority": 1,
+            }
+        ],
+    }
+    awaiting = json.loads(
+        await transition.execute(
+            gap_ready["workflow_id"],
+            CareerWorkflowState.AWAITING_CONFIRMATION.value,
+            json.dumps(plan_checkpoint),
+            gap_ready["version"],
+            "plan-flow",
+        )
+    )
+
+    assert awaiting["state"] == CareerWorkflowState.AWAITING_CONFIRMATION
+    assert awaiting["checkpoint"]["evidence"] == evidence
+    assert awaiting["checkpoint"]["gaps"] == gap_checkpoint["gaps"]
 
 
 async def test_generic_transition_cannot_forge_confirmation(tmp_path) -> None:
@@ -112,7 +242,11 @@ async def test_explicit_user_confirmation_advances_displayed_plan(tmp_path) -> N
         idempotency_key="workflow-1",
     )
     checkpoint = CareerCheckpoint(
-        evidence=[EvidenceReference(evidence_id="K1", source_name="jd.md", chunk_id="c1")],
+        evidence=[
+            EvidenceReference(
+                evidence_id="K1", source_type="jd", source_name="jd.md", chunk_id="c1"
+            )
+        ],
         gaps=[
             GapItem(
                 competency="RAG",

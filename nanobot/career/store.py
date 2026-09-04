@@ -220,6 +220,28 @@ class CareerWorkflowStore:
                     raise CareerWorkflowConflictError(
                         "failed workflow may only resume its recorded state"
                     )
+            elif (
+                current.state is not CareerWorkflowState.DOCUMENTS_READY
+                and request.checkpoint.evidence != current.checkpoint.evidence
+            ):
+                raise CareerWorkflowConflictError(
+                    "retrieved evidence is immutable; start a new workflow for new evidence"
+                )
+            if (
+                current.state
+                in {
+                    CareerWorkflowState.GAP_READY,
+                    CareerWorkflowState.AWAITING_CONFIRMATION,
+                    CareerWorkflowState.TASKS_CREATING,
+                    CareerWorkflowState.TASKS_CREATED,
+                    CareerWorkflowState.FOLLOWUP_SCHEDULED,
+                }
+                and request.target_state is not CareerWorkflowState.FAILED
+                and request.checkpoint.gaps != current.checkpoint.gaps
+            ):
+                raise CareerWorkflowConflictError(
+                    "accepted gap analysis is immutable; start a new workflow to revise it"
+                )
             self._validate_checkpoint(request.target_state, request.checkpoint)
             updated_at = datetime.now(timezone.utc)
             connection.execute(

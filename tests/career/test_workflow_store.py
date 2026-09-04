@@ -16,7 +16,11 @@ from nanobot.career import (
 
 def _checkpoint(*, confirmed: bool = False) -> CareerCheckpoint:
     return CareerCheckpoint(
-        evidence=[EvidenceReference(evidence_id="K1", source_name="jd.md", chunk_id="c1")],
+        evidence=[
+            EvidenceReference(
+                evidence_id="K1", source_type="jd", source_name="jd.md", chunk_id="c1"
+            )
+        ],
         gaps=[
             GapItem(
                 competency="RAG evaluation",
@@ -210,3 +214,108 @@ def test_failed_workflow_only_resumes_recorded_state(tmp_path) -> None:
     )
     assert resumed.state is CareerWorkflowState.DOCUMENTS_READY
     assert resumed.version == 3
+
+
+def test_gap_cannot_reference_evidence_that_was_not_retrieved() -> None:
+    with pytest.raises(ValueError, match="unknown evidence"):
+        CareerCheckpoint(
+            evidence=[
+                EvidenceReference(
+                    evidence_id="K1",
+                    source_type="jd",
+                    source_name="jd.md",
+                    chunk_id="real-chunk",
+                )
+            ],
+            gaps=[
+                GapItem(
+                    competency="MCP",
+                    status=GapStatus.MISSING,
+                    rationale="No resume evidence",
+                    evidence_ids=["K99"],
+                )
+            ],
+        )
+
+
+def test_gap_requires_jd_evidence_and_demonstrated_match_requires_resume() -> None:
+    evidence = [
+        EvidenceReference(
+            evidence_id="K1",
+            source_type="resume",
+            source_name="resume.md",
+            chunk_id="resume-chunk",
+        ),
+        EvidenceReference(
+            evidence_id="K2",
+            source_type="jd",
+            source_name="jd.md",
+            chunk_id="jd-chunk",
+        ),
+    ]
+    with pytest.raises(ValueError, match="must cite JD evidence"):
+        CareerCheckpoint(
+            evidence=evidence,
+            gaps=[
+                GapItem(
+                    competency="Python",
+                    status=GapStatus.WEAK_EVIDENCE,
+                    rationale="Resume mention without a target requirement.",
+                    evidence_ids=["K1"],
+                )
+            ],
+        )
+    with pytest.raises(ValueError, match="both resume and JD"):
+        CareerCheckpoint(
+            evidence=evidence,
+            gaps=[
+                GapItem(
+                    competency="RAG evaluation",
+                    status=GapStatus.DEMONSTRATED,
+                    rationale="The JD requires it but the resume does not prove it.",
+                    evidence_ids=["K2"],
+                )
+            ],
+        )
+
+
+def test_retrieved_evidence_cannot_be_replaced_by_a_later_model_step(tmp_path) -> None:
+    store = CareerWorkflowStore(tmp_path / "career.db")
+    store.initialize()
+    workflow = store.create(
+        CareerWorkflowCreate(resume_source="resume.md", jd_source="jd.md"),
+        idempotency_key="workflow-1",
+    )
+    evidence_checkpoint = _checkpoint()
+    evidence = store.transition(
+        workflow.workflow_id,
+        CareerWorkflowTransition(
+            target_state=CareerWorkflowState.EVIDENCE_RETRIEVED,
+            checkpoint=evidence_checkpoint,
+        ),
+        expected_version=workflow.version,
+        idempotency_key="evidence",
+    )
+    forged = evidence_checkpoint.model_copy(
+        update={
+            "evidence": [
+                EvidenceReference(
+                    evidence_id="K1",
+                    source_type="jd",
+                    source_name="invented.md",
+                    chunk_id="invented",
+                )
+            ]
+        }
+    )
+
+    with pytest.raises(CareerWorkflowConflictError, match="evidence is immutable"):
+        store.transition(
+            evidence.workflow_id,
+            CareerWorkflowTransition(
+                target_state=CareerWorkflowState.GAP_READY,
+                checkpoint=forged,
+            ),
+            expected_version=evidence.version,
+            idempotency_key="forged-gap",
+        )

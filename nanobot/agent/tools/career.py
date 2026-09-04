@@ -11,6 +11,7 @@ from pydantic import Field, ValidationError, field_validator
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import RequestContext, ToolContext
+from nanobot.agent.tools.knowledge import KnowledgeToolsConfig
 from nanobot.agent.tools.path_utils import resolve_workspace_path
 from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
 from nanobot.career import (
@@ -21,8 +22,18 @@ from nanobot.career import (
     CareerWorkflowState,
     CareerWorkflowStore,
     CareerWorkflowTransition,
+    EvidenceReference,
 )
 from nanobot.config_base import Base
+from nanobot.knowledge import (
+    EmbeddingProvider,
+    EmbeddingProviderError,
+    HybridKnowledgeRetriever,
+    KnowledgeSearchResult,
+    KnowledgeStore,
+    OpenAICompatibleEmbeddingProvider,
+)
+from nanobot.knowledge.ingest import KnowledgeIngestionError, ingest_document
 from nanobot.tasking import TaskNotFoundError, TaskStore
 
 
@@ -141,6 +152,178 @@ class CareerWorkflowGetTool(_CareerTool):
             return self._store.get(workflow_id).model_dump_json()
         except CareerWorkflowNotFoundError as exc:
             return ToolResult.error(str(exc))
+
+
+@tool_parameters(
+    tool_parameters_schema(
+        workflow_id=StringSchema("Workflow ID whose resume and JD should be searched."),
+        queries_json=StringSchema(
+            "JSON array of 1-20 concise competency queries derived from the target JD.",
+            min_length=2,
+            max_length=10_000,
+        ),
+        expected_version=IntegerSchema(description="Latest workflow version.", minimum=1),
+        idempotency_key=StringSchema(
+            "Stable key for safely replaying this retrieval step.", min_length=1, max_length=200
+        ),
+        required=["workflow_id", "queries_json", "expected_version", "idempotency_key"],
+    )
+)
+class CareerWorkflowRetrieveTool(_CareerTool):
+    """Index the verified documents and persist only genuine retrieval evidence."""
+
+    @classmethod
+    def create(cls, ctx: ToolContext) -> Tool:
+        return cls(
+            workspace=Path(ctx.workspace),
+            config=ctx.config.career,
+            knowledge_config=ctx.config.knowledge,
+        )
+
+    def __init__(
+        self,
+        *,
+        workspace: Path,
+        config: CareerToolsConfig,
+        knowledge_config: KnowledgeToolsConfig,
+        embedding_provider: EmbeddingProvider | None = None,
+    ) -> None:
+        super().__init__(workspace=workspace, config=config)
+        database_path = (self._workspace / knowledge_config.database_path).resolve(strict=False)
+        self._knowledge_store = KnowledgeStore(database_path)
+        self._knowledge_store.initialize()
+        self._knowledge_config = knowledge_config
+        if knowledge_config.retrieval_mode == "hybrid":
+            provider = embedding_provider or OpenAICompatibleEmbeddingProvider(
+                model=knowledge_config.embedding_model,
+                api_key=knowledge_config.embedding_api_key,
+                base_url=knowledge_config.embedding_base_url,
+                dimensions=knowledge_config.embedding_dimensions,
+                batch_size=knowledge_config.embedding_batch_size,
+            )
+            self._retriever: HybridKnowledgeRetriever | None = HybridKnowledgeRetriever(
+                self._knowledge_store, provider
+            )
+        else:
+            self._retriever = None
+
+    @property
+    def name(self) -> str:
+        return "career_workflow_retrieve"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Index and search the workflow's verified resume and JD, persist genuine chunk "
+            "references, and return untrusted evidence for gap analysis."
+        )
+
+    async def execute(
+        self,
+        workflow_id: str,
+        queries_json: str,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> str:
+        try:
+            raw_queries = json.loads(queries_json)
+            if (
+                not isinstance(raw_queries, list)
+                or not 1 <= len(raw_queries) <= 20
+                or not all(isinstance(query, str) and query.strip() for query in raw_queries)
+            ):
+                raise ValueError("queries_json must contain 1-20 non-empty strings")
+            queries: list[str] = [query.strip() for query in raw_queries]
+            current = self._store.get(workflow_id)
+            resume = self._document(current.resume_source)
+            jd = self._document(current.jd_source)
+            for source in (resume, jd):
+                await self._index(source)
+
+            allowed_paths = {resume.resolve(): "resume", jd.resolve(): "jd"}
+            unique_results: dict[str, KnowledgeSearchResult] = {}
+            for query in queries:
+                for result in await self._search(query):
+                    if result.source_path.resolve() in allowed_paths:
+                        unique_results.setdefault(result.chunk.chunk_id, result)
+            if not unique_results:
+                raise ValueError("retrieval produced no evidence from the workflow documents")
+
+            evidence_payload: list[dict[str, object]] = []
+            references = []
+            for index, result in enumerate(unique_results.values(), 1):
+                source_type = allowed_paths[result.source_path.resolve()]
+                evidence_id = f"K{index}"
+                references.append(
+                    EvidenceReference(
+                        evidence_id=evidence_id,
+                        source_type=source_type,
+                        source_name=result.source_name,
+                        chunk_id=result.chunk.chunk_id,
+                    )
+                )
+                evidence_payload.append(
+                    {
+                        "evidence_id": evidence_id,
+                        "source_type": source_type,
+                        "source_name": result.source_name,
+                        "chunk_id": result.chunk.chunk_id,
+                        "text": result.chunk.text,
+                    }
+                )
+            checkpoint = current.checkpoint.model_copy(update={"evidence": references})
+            workflow = self._store.transition(
+                workflow_id,
+                CareerWorkflowTransition(
+                    target_state=CareerWorkflowState.EVIDENCE_RETRIEVED,
+                    checkpoint=checkpoint,
+                ),
+                expected_version=expected_version,
+                idempotency_key=idempotency_key,
+            )
+        except (
+            CareerWorkflowConflictError,
+            CareerWorkflowNotFoundError,
+            EmbeddingProviderError,
+            KnowledgeIngestionError,
+            OSError,
+            ValueError,
+        ) as exc:
+            return ToolResult.error(f"Career evidence retrieval failed: {exc}")
+        return json.dumps(
+            {"workflow": workflow.model_dump(mode="json"), "evidence": evidence_payload},
+            ensure_ascii=False,
+        )
+
+    async def _index(self, source: Path) -> None:
+        if self._retriever is None:
+            ingest_document(source, self._knowledge_store)
+            return
+        try:
+            await self._retriever.index_document(source)
+        except EmbeddingProviderError:
+            if not self._knowledge_config.fallback_to_lexical:
+                raise
+            ingest_document(source, self._knowledge_store)
+
+    async def _search(self, query: str) -> list[KnowledgeSearchResult]:
+        if self._retriever is None:
+            return self._knowledge_store.search_lexical(
+                query, limit=self._knowledge_config.candidate_results
+            )
+        try:
+            fused = await self._retriever.search(
+                query,
+                limit=self._knowledge_config.candidate_results,
+                candidate_limit=self._knowledge_config.candidate_results,
+            )
+            return [item.result for item in fused]
+        except EmbeddingProviderError:
+            if not self._knowledge_config.fallback_to_lexical:
+                raise
+            return self._knowledge_store.search_lexical(
+                query, limit=self._knowledge_config.candidate_results
+            )
 
 
 @tool_parameters(
