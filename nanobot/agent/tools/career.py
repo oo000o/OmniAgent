@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import Field, ValidationError, field_validator
 
@@ -232,21 +232,27 @@ class CareerWorkflowRetrieveTool(_CareerTool):
         idempotency_key: str,
     ) -> str:
         try:
-            raw_queries = json.loads(queries_json)
-            if (
-                not isinstance(raw_queries, list)
-                or not 1 <= len(raw_queries) <= 20
-                or not all(isinstance(query, str) and query.strip() for query in raw_queries)
-            ):
+            parsed_queries: object = json.loads(queries_json)
+            if not isinstance(parsed_queries, list):
                 raise ValueError("queries_json must contain 1-20 non-empty strings")
-            queries: list[str] = [query.strip() for query in raw_queries]
+            raw_queries = cast(list[object], parsed_queries)
+            if not 1 <= len(raw_queries) <= 20:
+                raise ValueError("queries_json must contain 1-20 non-empty strings")
+            queries: list[str] = []
+            for query in raw_queries:
+                if not isinstance(query, str) or not query.strip():
+                    raise ValueError("queries_json must contain 1-20 non-empty strings")
+                queries.append(query.strip())
             current = self._store.get(workflow_id)
             resume = self._document(current.resume_source)
             jd = self._document(current.jd_source)
             for source in (resume, jd):
                 await self._index(source)
 
-            allowed_paths = {resume.resolve(): "resume", jd.resolve(): "jd"}
+            allowed_paths: dict[Path, Literal["resume", "jd"]] = {
+                resume.resolve(): "resume",
+                jd.resolve(): "jd",
+            }
             unique_results: dict[str, KnowledgeSearchResult] = {}
             for query in queries:
                 for result in await self._search(query):
@@ -256,7 +262,7 @@ class CareerWorkflowRetrieveTool(_CareerTool):
                 raise ValueError("retrieval produced no evidence from the workflow documents")
 
             evidence_payload: list[dict[str, object]] = []
-            references = []
+            references: list[EvidenceReference] = []
             for index, result in enumerate(unique_results.values(), 1):
                 source_type = allowed_paths[result.source_path.resolve()]
                 evidence_id = f"K{index}"
@@ -451,13 +457,15 @@ class CareerWorkflowRecordTasksTool(_CareerTool):
         idempotency_key: str,
     ) -> str:
         try:
-            raw_mapping = json.loads(task_ids_json)
-            if not isinstance(raw_mapping, dict) or not all(
-                isinstance(key, str) and isinstance(value, str)
-                for key, value in raw_mapping.items()
-            ):
+            parsed_mapping: object = json.loads(task_ids_json)
+            if not isinstance(parsed_mapping, dict):
                 raise ValueError("task_ids_json must be a string-to-string JSON object")
-            task_ids: dict[str, str] = raw_mapping
+            raw_mapping = cast(dict[object, object], parsed_mapping)
+            task_ids: dict[str, str] = {}
+            for key, value in raw_mapping.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    raise ValueError("task_ids_json must be a string-to-string JSON object")
+                task_ids[key] = value
             current = self._store.get(workflow_id)
             if current.state not in {
                 CareerWorkflowState.TASKS_CREATING,
