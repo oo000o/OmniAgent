@@ -7,6 +7,7 @@ from nanobot.agent.tools.career import (
     CareerWorkflowRecordTasksTool,
     CareerWorkflowRetrieveTool,
     CareerWorkflowStartTool,
+    CareerWorkflowTaskManifestTool,
     CareerWorkflowTransitionTool,
 )
 from nanobot.agent.tools.context import RequestContext
@@ -314,3 +315,129 @@ async def test_explicit_user_confirmation_advances_displayed_plan(tmp_path) -> N
 
     assert recorded["state"] == CareerWorkflowState.TASKS_CREATED
     assert recorded["checkpoint"]["task_ids"] == {"rag": task.task_id}
+
+
+async def test_task_manifest_recovers_after_partial_mcp_creation(tmp_path) -> None:
+    database_path = tmp_path / "state" / "career.db"
+    store = CareerWorkflowStore(database_path)
+    store.initialize()
+    current = store.create(
+        CareerWorkflowCreate(resume_source="resume.md", jd_source="jd.md"),
+        idempotency_key="workflow-partial",
+    )
+    checkpoint = CareerCheckpoint(
+        evidence=[
+            EvidenceReference(
+                evidence_id="K1", source_type="jd", source_name="jd.md", chunk_id="c1"
+            )
+        ],
+        gaps=[
+            GapItem(
+                competency="Agent reliability",
+                status=GapStatus.MISSING,
+                rationale="Required by the JD.",
+                evidence_ids=["K1"],
+            )
+        ],
+        plan=[
+            LearningPlanItem(item_id="rag", title="Build RAG evaluation", priority=1),
+            LearningPlanItem(item_id="recovery", title="Test checkpoint recovery", priority=2),
+        ],
+    )
+    for state, key in (
+        (CareerWorkflowState.EVIDENCE_RETRIEVED, "partial-evidence"),
+        (CareerWorkflowState.GAP_READY, "partial-gap"),
+        (CareerWorkflowState.AWAITING_CONFIRMATION, "partial-plan"),
+    ):
+        current = store.transition(
+            current.workflow_id,
+            CareerWorkflowTransition(target_state=state, checkpoint=checkpoint),
+            expected_version=current.version,
+            idempotency_key=key,
+        )
+    confirm = CareerWorkflowConfirmTool(
+        workspace=tmp_path,
+        config=CareerToolsConfig(database_path="state/career.db"),
+    )
+    confirm.set_context(
+        RequestContext(
+            channel="feishu",
+            chat_id="chat-1",
+            original_user_text="确认创建学习任务",
+        )
+    )
+    creating = json.loads(
+        await confirm.execute(current.workflow_id, current.version, "partial-confirm")
+    )
+    config = CareerToolsConfig(
+        database_path="state/career.db", task_database_path="state/tasks.db"
+    )
+    manifest = CareerWorkflowTaskManifestTool(workspace=tmp_path, config=config)
+    initial = json.loads(await manifest.execute(current.workflow_id))
+    assert {call["plan_item_id"] for call in initial["pending_calls"]} == {
+        "rag",
+        "recovery",
+    }
+
+    task_store = TaskStore(database_path.parent / "tasks.db")
+    task_store.initialize()
+    first_call = initial["pending_calls"][0]
+    first_args = first_call["arguments"]
+    first_request = TaskCreate(
+        title=first_args["title"],
+        description=first_args["description"],
+        priority=first_args["priority"],
+        tags=first_args["tags"],
+        source=first_args["source"],
+    )
+    first_task = task_store.create(
+        first_request, idempotency_key=first_args["idempotency_key"]
+    )
+
+    recovered = json.loads(await manifest.execute(current.workflow_id))
+    assert recovered["completed_task_ids"] == {first_call["plan_item_id"]: first_task.task_id}
+    assert len(recovered["pending_calls"]) == 1
+    assert task_store.create(
+        first_request, idempotency_key=first_args["idempotency_key"]
+    ).task_id == first_task.task_id
+
+    second_call = recovered["pending_calls"][0]
+    second_args = second_call["arguments"]
+    second_task = task_store.create(
+        TaskCreate(
+            title=second_args["title"],
+            description=second_args["description"],
+            priority=second_args["priority"],
+            tags=second_args["tags"],
+            source=second_args["source"],
+        ),
+        idempotency_key=second_args["idempotency_key"],
+    )
+    complete = json.loads(await manifest.execute(current.workflow_id))
+    assert complete["pending_calls"] == []
+
+    record = CareerWorkflowRecordTasksTool(workspace=tmp_path, config=config)
+    recorded = json.loads(
+        await record.execute(
+            current.workflow_id,
+            json.dumps(
+                {
+                    first_call["plan_item_id"]: first_task.task_id,
+                    second_call["plan_item_id"]: second_task.task_id,
+                }
+            ),
+            creating["version"],
+            "partial-record",
+        )
+    )
+    assert recorded["state"] == CareerWorkflowState.TASKS_CREATED
+    assert len(recorded["checkpoint"]["task_ids"]) == 2
+    replay = json.loads(
+        await record.execute(
+            current.workflow_id,
+            json.dumps(recorded["checkpoint"]["task_ids"]),
+            creating["version"],
+            "partial-record",
+        )
+    )
+    assert replay == recorded

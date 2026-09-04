@@ -162,6 +162,26 @@ class TaskStore:
             raise TaskNotFoundError(f"task {task_id!r} was not found")
         return self._row_to_task(row)
 
+    def get_created_by_idempotency_key(self, idempotency_key: str) -> Task | None:
+        """Resolve an authoritative create receipt without replaying the mutation."""
+        key = idempotency_key.strip()
+        if not key or len(key) > 200:
+            raise ValueError("idempotency_key must contain 1-200 characters")
+        with self._connect() as connection:
+            receipt = connection.execute(
+                """SELECT task_id FROM task_idempotency
+                WHERE idempotency_key = ? AND operation = 'create'""",
+                (key,),
+            ).fetchone()
+            if receipt is None:
+                return None
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (receipt["task_id"],)
+            ).fetchone()
+        if row is None:
+            raise TaskConflictError("idempotency record references a missing task")
+        return self._row_to_task(row)
+
     def list(
         self,
         *,

@@ -34,7 +34,7 @@ from nanobot.knowledge import (
     OpenAICompatibleEmbeddingProvider,
 )
 from nanobot.knowledge.ingest import KnowledgeIngestionError, ingest_document
-from nanobot.tasking import TaskNotFoundError, TaskStore
+from nanobot.tasking import TaskConflictError, TaskNotFoundError, TaskStore
 
 
 class CareerToolsConfig(Base):
@@ -453,7 +453,10 @@ class CareerWorkflowRecordTasksTool(_CareerTool):
                 raise ValueError("task_ids_json must be a string-to-string JSON object")
             task_ids: dict[str, str] = raw_mapping
             current = self._store.get(workflow_id)
-            if current.state is not CareerWorkflowState.TASKS_CREATING:
+            if current.state not in {
+                CareerWorkflowState.TASKS_CREATING,
+                CareerWorkflowState.TASKS_CREATED,
+            }:
                 raise CareerWorkflowConflictError("workflow is not creating tasks")
             plan = {item.item_id: item for item in current.checkpoint.plan}
             if set(task_ids) != set(plan):
@@ -483,6 +486,85 @@ class CareerWorkflowRecordTasksTool(_CareerTool):
         ) as exc:
             return ToolResult.error(f"Career task verification failed: {exc}")
         return workflow.model_dump_json()
+
+
+@tool_parameters(
+    tool_parameters_schema(
+        workflow_id=StringSchema("Confirmed workflow whose task creation should resume."),
+        required=["workflow_id"],
+    )
+)
+class CareerWorkflowTaskManifestTool(_CareerTool):
+    """Reconstruct completed and pending MCP task_create calls from durable receipts."""
+
+    @property
+    def name(self) -> str:
+        return "career_workflow_task_manifest"
+
+    @property
+    def description(self) -> str:
+        return (
+            "After explicit confirmation, inspect authoritative task receipts and return "
+            "completed task IDs plus exact pending mcp_omniagent_tasks_task_create arguments. "
+            "Call the pending MCP tools, then verify all returned IDs with "
+            "career_workflow_record_tasks."
+        )
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    async def execute(self, workflow_id: str) -> str:
+        try:
+            current = self._store.get(workflow_id)
+            if current.state is not CareerWorkflowState.TASKS_CREATING:
+                raise CareerWorkflowConflictError("workflow is not creating tasks")
+            completed: dict[str, str] = {}
+            pending: list[dict[str, object]] = []
+            for item in current.checkpoint.plan:
+                key = f"career:{workflow_id}:{item.item_id}"
+                task = self._task_store.get_created_by_idempotency_key(key)
+                if task is None:
+                    pending.append(
+                        {
+                            "plan_item_id": item.item_id,
+                            "tool": "mcp_omniagent_tasks_task_create",
+                            "arguments": {
+                                "title": item.title,
+                                "description": item.description,
+                                "priority": item.priority,
+                                "tags": ["career-plan"],
+                                "source": key,
+                                "idempotency_key": key,
+                            },
+                        }
+                    )
+                    continue
+                if task.source != key or task.title != item.title:
+                    raise ValueError(
+                        f"task receipt for plan item {item.item_id!r} does not match the plan"
+                    )
+                completed[item.item_id] = task.task_id
+        except (
+            CareerWorkflowConflictError,
+            CareerWorkflowNotFoundError,
+            TaskConflictError,
+            ValueError,
+        ) as exc:
+            return ToolResult.error(f"Career task manifest failed: {exc}")
+        return json.dumps(
+            {
+                "workflow_id": workflow_id,
+                "workflow_version": current.version,
+                "completed_task_ids": completed,
+                "pending_calls": pending,
+                "next_step": (
+                    "call every pending MCP tool, merge returned task IDs with "
+                    "completed_task_ids, then call career_workflow_record_tasks"
+                ),
+            },
+            ensure_ascii=False,
+        )
 
 
 @tool_parameters(

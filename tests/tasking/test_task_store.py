@@ -30,6 +30,14 @@ def test_create_is_idempotent_for_same_key_and_payload(tmp_path) -> None:
     assert len(store.list()) == 1
 
 
+def test_create_receipt_can_be_resolved_without_replaying_mutation(tmp_path) -> None:
+    store = _store(tmp_path)
+    task = store.create(TaskCreate(title="Review RAG"), idempotency_key="career:rag")
+
+    assert store.get_created_by_idempotency_key("career:rag") == task
+    assert store.get_created_by_idempotency_key("career:missing") is None
+
+
 def test_reused_key_with_different_payload_conflicts(tmp_path) -> None:
     store = _store(tmp_path)
     store.create(TaskCreate(title="First"), idempotency_key="same")
