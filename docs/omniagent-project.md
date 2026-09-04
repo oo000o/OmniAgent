@@ -111,7 +111,7 @@ GitHub Actions 会自动执行评测、保存 JSON artifact，并在 Docker 镜�
 - [x] WebUI 能查看本次运行耗时、Token、工具、重试和错误。
 - [x] `python -m evaluation.run` 达到 60/60。
 - [x] Docker 镜像以非 root 运行，并在镜像内通过 60/60 容器评测。
-- [ ] 仓库发布后由 GitHub Actions 再次通过 CI 门禁。
+- [x] 仓库发布后由 GitHub Actions 再次通过 CI 门禁（8/8 jobs）。
 
 前五项中的真实飞书收发需要开发者应用凭证；离线测试使用受控替身，不把模拟结果
 描述成线上验证。

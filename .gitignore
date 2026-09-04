@@ -93,6 +93,7 @@ nano.*.save
 .env.*
 .docker-data/
 !.env.example
+!.env.omniagent.example
 /config/
 /workspace/
 
