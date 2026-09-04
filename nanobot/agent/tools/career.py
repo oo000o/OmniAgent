@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import Field, ValidationError, field_validator
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
-from nanobot.agent.tools.context import RequestContext, ToolContext
+from nanobot.agent.tools.context import RequestContext, ToolContext, current_request_context
 from nanobot.agent.tools.knowledge import KnowledgeToolsConfig
 from nanobot.agent.tools.path_utils import resolve_workspace_path
 from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
@@ -34,7 +35,12 @@ from nanobot.knowledge import (
     OpenAICompatibleEmbeddingProvider,
 )
 from nanobot.knowledge.ingest import KnowledgeIngestionError, ingest_document
-from nanobot.tasking import TaskConflictError, TaskNotFoundError, TaskStore
+from nanobot.session.keys import UNIFIED_SESSION_KEY
+from nanobot.tasking import TaskConflictError, TaskNotFoundError, TaskStatus, TaskStore
+
+if TYPE_CHECKING:
+    from nanobot.cron.service import CronService
+    from nanobot.cron.types import CronJob
 
 
 class CareerToolsConfig(Base):
@@ -565,6 +571,237 @@ class CareerWorkflowTaskManifestTool(_CareerTool):
             },
             ensure_ascii=False,
         )
+
+
+class _CareerCronTool(_CareerTool):
+    _plugin_discoverable = False
+
+    @classmethod
+    def enabled(cls, ctx: ToolContext) -> bool:
+        return super().enabled(ctx) and ctx.cron_service is not None
+
+    @classmethod
+    def create(cls, ctx: ToolContext) -> Tool:
+        if ctx.cron_service is None:
+            raise RuntimeError("career cron tools require an initialized cron service")
+        return cls(
+            workspace=Path(ctx.workspace),
+            config=ctx.config.career,
+            cron_service=ctx.cron_service,
+        )
+
+    def __init__(
+        self,
+        *,
+        workspace: Path,
+        config: CareerToolsConfig,
+        cron_service: CronService,
+    ) -> None:
+        super().__init__(workspace=workspace, config=config)
+        self._cron = cron_service
+
+    @staticmethod
+    def _job_name(workflow_id: str) -> str:
+        return f"career-followup:{workflow_id}"
+
+    def _matching_jobs(self, workflow_id: str) -> list[CronJob]:
+        name = self._job_name(workflow_id)
+        return [
+            job
+            for job in self._cron.list_jobs(include_disabled=True)
+            if job.name == name and job.payload.kind == "agent_turn"
+        ]
+
+
+@tool_parameters(
+    tool_parameters_schema(
+        workflow_id=StringSchema("Workflow whose created tasks should be checked periodically."),
+        every_seconds=IntegerSchema(
+            description="Follow-up interval in seconds (minimum 300).", minimum=300
+        ),
+        expected_version=IntegerSchema(description="Latest workflow version.", minimum=1),
+        idempotency_key=StringSchema(
+            "Stable key for scheduling or recovering this follow-up.",
+            min_length=1,
+            max_length=200,
+        ),
+        required=["workflow_id", "every_seconds", "expected_version", "idempotency_key"],
+    )
+)
+class CareerWorkflowScheduleTool(_CareerCronTool):
+    """Create or recover one channel-bound Cron job and checkpoint its real ID."""
+
+    _plugin_discoverable = True
+
+    @property
+    def name(self) -> str:
+        return "career_workflow_schedule"
+
+    @property
+    def description(self) -> str:
+        return (
+            "After verified task creation, schedule one recurring progress check bound to "
+            "the current chat. Replays recover the persisted Cron job instead of duplicating it."
+        )
+
+    async def execute(
+        self,
+        workflow_id: str,
+        every_seconds: int,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> str:
+        try:
+            if every_seconds < 300:
+                raise ValueError("every_seconds must be at least 300")
+            current = self._store.get(workflow_id)
+            if current.state not in {
+                CareerWorkflowState.TASKS_CREATED,
+                CareerWorkflowState.FOLLOWUP_SCHEDULED,
+            }:
+                raise CareerWorkflowConflictError("workflow tasks have not been created")
+            ctx = current_request_context()
+            if ctx is None or not ctx.channel or not ctx.chat_id:
+                raise ValueError("follow-up scheduling requires an originating chat")
+            raw_key = f"{ctx.channel}:{ctx.chat_id}"
+            session_key = raw_key if ctx.session_key == UNIFIED_SESSION_KEY else ctx.session_key
+            if not session_key:
+                session_key = raw_key
+            jobs = self._matching_jobs(workflow_id)
+            if len(jobs) > 1:
+                raise CareerWorkflowConflictError("multiple follow-up jobs require manual repair")
+            message = (
+                f"Check career workflow {workflow_id}. Read its authoritative checkpoint, "
+                "call task_get for every persisted task ID, report progress to this chat, and "
+                "call career_workflow_complete only when every task is done."
+            )
+            if jobs:
+                job = jobs[0]
+                if (
+                    job.schedule.kind != "every"
+                    or job.schedule.every_ms != every_seconds * 1000
+                    or job.payload.message != message
+                    or job.payload.origin_channel != ctx.channel
+                    or job.payload.origin_chat_id != ctx.chat_id
+                ):
+                    raise CareerWorkflowConflictError(
+                        "existing follow-up job does not match this workflow request"
+                    )
+            else:
+                from nanobot.cron.types import CronSchedule
+
+                job = self._cron.add_job(
+                    name=self._job_name(workflow_id),
+                    schedule=CronSchedule(kind="every", every_ms=every_seconds * 1000),
+                    message=message,
+                    session_key=session_key,
+                    origin_channel=ctx.channel,
+                    origin_chat_id=ctx.chat_id,
+                    origin_metadata=dict(ctx.metadata or {}),
+                )
+            checkpoint = current.checkpoint.model_copy(update={"followup_job_id": job.id})
+            workflow = self._store.transition(
+                workflow_id,
+                CareerWorkflowTransition(
+                    target_state=CareerWorkflowState.FOLLOWUP_SCHEDULED,
+                    checkpoint=checkpoint,
+                ),
+                expected_version=expected_version,
+                idempotency_key=idempotency_key,
+            )
+        except (
+            CareerWorkflowConflictError,
+            CareerWorkflowNotFoundError,
+            OSError,
+            RuntimeError,
+            ValueError,
+        ) as exc:
+            return ToolResult.error(f"Career follow-up scheduling failed: {exc}")
+        return workflow.model_dump_json()
+
+
+@tool_parameters(
+    tool_parameters_schema(
+        workflow_id=StringSchema("Scheduled workflow whose tasks may all be complete."),
+        expected_version=IntegerSchema(description="Latest workflow version.", minimum=1),
+        idempotency_key=StringSchema(
+            "Stable key for completing this workflow.", min_length=1, max_length=200
+        ),
+        required=["workflow_id", "expected_version", "idempotency_key"],
+    )
+)
+class CareerWorkflowCompleteTool(_CareerCronTool):
+    """Complete only after authoritative tasks are done, then clean up the Cron job."""
+
+    _plugin_discoverable = True
+
+    @property
+    def name(self) -> str:
+        return "career_workflow_complete"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Verify every checkpointed task is done, persist workflow completion, and remove "
+            "its recurring Cron job. Safe to replay after interruption."
+        )
+
+    async def execute(
+        self, workflow_id: str, expected_version: int, idempotency_key: str
+    ) -> str:
+        try:
+            current = self._store.get(workflow_id)
+            if current.state not in {
+                CareerWorkflowState.FOLLOWUP_SCHEDULED,
+                CareerWorkflowState.COMPLETED,
+            }:
+                raise CareerWorkflowConflictError("workflow has no scheduled follow-up")
+            if any(
+                self._task_store.get(task_id).status is not TaskStatus.DONE
+                for task_id in current.checkpoint.task_ids.values()
+            ):
+                raise CareerWorkflowConflictError("not all learning tasks are done")
+            job_id = current.checkpoint.followup_job_id
+            if not job_id:
+                raise ValueError("workflow has no persisted follow-up job ID")
+            job = self._cron.get_job(job_id)
+            if current.state is CareerWorkflowState.FOLLOWUP_SCHEDULED:
+                if job is None or job.name != self._job_name(workflow_id):
+                    raise CareerWorkflowConflictError(
+                        "persisted follow-up job is missing or belongs to another workflow"
+                    )
+                workflow = self._store.transition(
+                    workflow_id,
+                    CareerWorkflowTransition(
+                        target_state=CareerWorkflowState.COMPLETED,
+                        checkpoint=current.checkpoint,
+                    ),
+                    expected_version=expected_version,
+                    idempotency_key=idempotency_key,
+                )
+            else:
+                workflow = self._store.transition(
+                    workflow_id,
+                    CareerWorkflowTransition(
+                        target_state=CareerWorkflowState.COMPLETED,
+                        checkpoint=current.checkpoint,
+                    ),
+                    expected_version=expected_version,
+                    idempotency_key=idempotency_key,
+                )
+            removal = self._cron.remove_job(job_id)
+            if removal not in {"removed", "not_found"}:
+                raise RuntimeError("completed workflow follow-up job could not be removed")
+        except (
+            CareerWorkflowConflictError,
+            CareerWorkflowNotFoundError,
+            OSError,
+            RuntimeError,
+            TaskNotFoundError,
+            ValueError,
+        ) as exc:
+            return ToolResult.error(f"Career workflow completion failed: {exc}")
+        return workflow.model_dump_json()
 
 
 @tool_parameters(

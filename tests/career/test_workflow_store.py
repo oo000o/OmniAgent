@@ -108,7 +108,6 @@ def test_task_creation_requires_confirmation_and_real_task_ids(tmp_path) -> None
             expected_version=current.version,
             idempotency_key=key,
         )
-
     with pytest.raises(ValueError, match="confirmation"):
         store.transition(
             current.workflow_id,
@@ -138,6 +137,31 @@ def test_task_creation_requires_confirmation_and_real_task_ids(tmp_path) -> None
             ),
             expected_version=creating.version,
             idempotency_key="missing-tasks",
+        )
+
+
+def test_model_cannot_preseed_side_effect_receipts() -> None:
+    with pytest.raises(ValueError, match="confirmation may only be recorded"):
+        CareerWorkflowStore._validate_checkpoint(
+            CareerWorkflowState.AWAITING_CONFIRMATION,
+            _checkpoint(confirmed=True),
+        )
+    with pytest.raises(ValueError, match="task IDs may only be recorded"):
+        CareerWorkflowStore._validate_checkpoint(
+            CareerWorkflowState.TASKS_CREATING,
+            _checkpoint(confirmed=True).model_copy(
+                update={"task_ids": {"rag-eval": "invented-task"}}
+            ),
+        )
+    with pytest.raises(ValueError, match="follow-up job IDs may only be recorded"):
+        CareerWorkflowStore._validate_checkpoint(
+            CareerWorkflowState.TASKS_CREATED,
+            _checkpoint(confirmed=True).model_copy(
+                update={
+                    "task_ids": {"rag-eval": "real-task"},
+                    "followup_job_id": "invented-job",
+                }
+            ),
         )
 
 

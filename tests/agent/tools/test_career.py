@@ -2,15 +2,17 @@ import json
 
 from nanobot.agent.tools.career import (
     CareerToolsConfig,
+    CareerWorkflowCompleteTool,
     CareerWorkflowConfirmTool,
     CareerWorkflowGetTool,
     CareerWorkflowRecordTasksTool,
     CareerWorkflowRetrieveTool,
+    CareerWorkflowScheduleTool,
     CareerWorkflowStartTool,
     CareerWorkflowTaskManifestTool,
     CareerWorkflowTransitionTool,
 )
-from nanobot.agent.tools.context import RequestContext
+from nanobot.agent.tools.context import RequestContext, request_context
 from nanobot.agent.tools.knowledge import KnowledgeToolsConfig
 from nanobot.career import (
     CareerCheckpoint,
@@ -23,7 +25,9 @@ from nanobot.career import (
     GapStatus,
     LearningPlanItem,
 )
-from nanobot.tasking import TaskCreate, TaskStore
+from nanobot.cron.service import CronService
+from nanobot.session.keys import UNIFIED_SESSION_KEY
+from nanobot.tasking import TaskCreate, TaskStatus, TaskStore, TaskUpdate
 
 
 async def test_career_tools_start_replay_and_load(tmp_path) -> None:
@@ -441,3 +445,149 @@ async def test_task_manifest_recovers_after_partial_mcp_creation(tmp_path) -> No
         )
     )
     assert replay == recorded
+
+
+async def test_followup_schedule_survives_restart_and_completes_from_real_state(
+    tmp_path, monkeypatch
+) -> None:
+    career_path = tmp_path / "state" / "career.db"
+    task_path = tmp_path / "state" / "tasks.db"
+    cron_path = tmp_path / "state" / "cron.json"
+    workflow_store = CareerWorkflowStore(career_path)
+    workflow_store.initialize()
+    current = workflow_store.create(
+        CareerWorkflowCreate(resume_source="resume.md", jd_source="jd.md"),
+        idempotency_key="scheduled-workflow",
+    )
+    task_store = TaskStore(task_path)
+    task_store.initialize()
+    task = task_store.create(
+        TaskCreate(
+            title="Build RAG evaluation",
+            source=f"career:{current.workflow_id}:rag",
+        ),
+        idempotency_key=f"career:{current.workflow_id}:rag",
+    )
+    checkpoint = CareerCheckpoint(
+        evidence=[
+            EvidenceReference(
+                evidence_id="K1", source_type="jd", source_name="jd.md", chunk_id="c1"
+            )
+        ],
+        gaps=[
+            GapItem(
+                competency="RAG evaluation",
+                status=GapStatus.MISSING,
+                rationale="Required by the JD.",
+                evidence_ids=["K1"],
+            )
+        ],
+        plan=[LearningPlanItem(item_id="rag", title="Build RAG evaluation")],
+    )
+    for state, key in (
+        (CareerWorkflowState.EVIDENCE_RETRIEVED, "schedule-evidence"),
+        (CareerWorkflowState.GAP_READY, "schedule-gap"),
+        (CareerWorkflowState.AWAITING_CONFIRMATION, "schedule-plan"),
+    ):
+        current = workflow_store.transition(
+            current.workflow_id,
+            CareerWorkflowTransition(target_state=state, checkpoint=checkpoint),
+            expected_version=current.version,
+            idempotency_key=key,
+        )
+    confirmed = checkpoint.model_copy(update={"confirmed": True})
+    current = workflow_store.transition(
+        current.workflow_id,
+        CareerWorkflowTransition(
+            target_state=CareerWorkflowState.TASKS_CREATING, checkpoint=confirmed
+        ),
+        expected_version=current.version,
+        idempotency_key="schedule-confirm",
+    )
+    with_tasks = confirmed.model_copy(update={"task_ids": {"rag": task.task_id}})
+    current = workflow_store.transition(
+        current.workflow_id,
+        CareerWorkflowTransition(
+            target_state=CareerWorkflowState.TASKS_CREATED, checkpoint=with_tasks
+        ),
+        expected_version=current.version,
+        idempotency_key="schedule-tasks",
+    )
+
+    config = CareerToolsConfig(
+        database_path="state/career.db", task_database_path="state/tasks.db"
+    )
+    cron = CronService(cron_path)
+    schedule = CareerWorkflowScheduleTool(
+        workspace=tmp_path, config=config, cron_service=cron
+    )
+    origin = RequestContext(
+        channel="feishu",
+        chat_id="oc_interview",
+        session_key=UNIFIED_SESSION_KEY,
+        metadata={"message_id": "om_confirm"},
+    )
+    original_transition = schedule._store.transition
+
+    def fail_checkpoint(*args, **kwargs):
+        raise OSError("simulated checkpoint outage")
+
+    monkeypatch.setattr(schedule._store, "transition", fail_checkpoint)
+    with request_context(origin):
+        interrupted = await schedule.execute(
+            current.workflow_id, 3600, current.version, "schedule-followup"
+        )
+    assert "simulated checkpoint outage" in interrupted
+    assert len(cron.list_jobs()) == 1
+    monkeypatch.setattr(schedule._store, "transition", original_transition)
+    recovery_cron = CronService(cron_path)
+    schedule = CareerWorkflowScheduleTool(
+        workspace=tmp_path, config=config, cron_service=recovery_cron
+    )
+
+    with request_context(origin):
+        scheduled = json.loads(
+            await schedule.execute(
+                current.workflow_id, 3600, current.version, "schedule-followup"
+            )
+        )
+        replay = json.loads(
+            await schedule.execute(
+                current.workflow_id, 3600, current.version, "schedule-followup"
+            )
+        )
+    assert replay == scheduled
+    assert len(recovery_cron.list_jobs()) == 1
+    job = recovery_cron.list_jobs()[0]
+    assert job.id == scheduled["checkpoint"]["followup_job_id"]
+    assert job.payload.origin_channel == "feishu"
+    assert job.payload.origin_chat_id == "oc_interview"
+
+    restarted_cron = CronService(cron_path)
+    complete = CareerWorkflowCompleteTool(
+        workspace=tmp_path, config=config, cron_service=restarted_cron
+    )
+    incomplete = await complete.execute(
+        current.workflow_id, scheduled["version"], "complete-followup"
+    )
+    assert "not all learning tasks are done" in incomplete
+
+    task_store.update(
+        task.task_id,
+        TaskUpdate(status=TaskStatus.DONE),
+        expected_version=task.version,
+        idempotency_key="finish-rag-task",
+    )
+    completed = json.loads(
+        await complete.execute(
+            current.workflow_id, scheduled["version"], "complete-followup"
+        )
+    )
+    assert completed["state"] == CareerWorkflowState.COMPLETED
+    assert restarted_cron.get_job(job.id) is None
+    completed_replay = json.loads(
+        await complete.execute(
+            current.workflow_id, scheduled["version"], "complete-followup"
+        )
+    )
+    assert completed_replay == completed

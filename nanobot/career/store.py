@@ -272,6 +272,27 @@ class CareerWorkflowStore:
     @staticmethod
     def _validate_checkpoint(state: CareerWorkflowState, checkpoint: CareerCheckpoint) -> None:
         if state in {
+            CareerWorkflowState.DOCUMENTS_READY,
+            CareerWorkflowState.EVIDENCE_RETRIEVED,
+            CareerWorkflowState.GAP_READY,
+            CareerWorkflowState.AWAITING_CONFIRMATION,
+        } and checkpoint.confirmed:
+            raise ValueError("confirmation may only be recorded by the confirmation step")
+        if state in {
+            CareerWorkflowState.DOCUMENTS_READY,
+            CareerWorkflowState.EVIDENCE_RETRIEVED,
+            CareerWorkflowState.GAP_READY,
+            CareerWorkflowState.AWAITING_CONFIRMATION,
+            CareerWorkflowState.TASKS_CREATING,
+        } and checkpoint.task_ids:
+            raise ValueError("task IDs may only be recorded after task verification")
+        if state not in {
+            CareerWorkflowState.FOLLOWUP_SCHEDULED,
+            CareerWorkflowState.COMPLETED,
+            CareerWorkflowState.FAILED,
+        } and checkpoint.followup_job_id:
+            raise ValueError("follow-up job IDs may only be recorded after scheduling")
+        if state in {
             CareerWorkflowState.EVIDENCE_RETRIEVED,
             CareerWorkflowState.GAP_READY,
             CareerWorkflowState.AWAITING_CONFIRMATION,
@@ -311,7 +332,10 @@ class CareerWorkflowStore:
             CareerWorkflowState.COMPLETED,
         } and set(checkpoint.task_ids) != {item.item_id for item in checkpoint.plan}:
             raise ValueError("every plan item must have a persisted task ID")
-        if state is CareerWorkflowState.FOLLOWUP_SCHEDULED and not checkpoint.followup_job_id:
+        if state in {
+            CareerWorkflowState.FOLLOWUP_SCHEDULED,
+            CareerWorkflowState.COMPLETED,
+        } and not checkpoint.followup_job_id:
             raise ValueError("scheduled follow-up requires a job ID")
         if state is CareerWorkflowState.FAILED and not checkpoint.error:
             raise ValueError("failed workflows require an error")
