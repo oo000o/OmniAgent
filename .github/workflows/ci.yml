@@ -77,7 +77,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.python_required == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # The coverage leg also runs Ruff, strict BasedPyright, the full 6.8k+
+    # test suite, and the evaluation gate. Keep a bounded timeout without
+    # cancelling healthy runs on slower hosted runners.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
