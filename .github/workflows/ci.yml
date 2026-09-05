@@ -141,6 +141,7 @@ jobs:
         if: matrix.coverage
         run: >-
           uv run --no-sync python -m pytest
+          -n auto --dist loadfile
           --cov=nanobot --cov-report=term-missing:skip-covered
           --durations=25 --durations-min=1.0
 
