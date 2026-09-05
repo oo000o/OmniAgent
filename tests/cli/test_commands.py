@@ -2494,7 +2494,7 @@ def test_webui_missing_runtime_env_fails_before_starting_gateway(
     assert result.exit_code == 1
     assert missing_env in result.stdout
     assert "nanobot status --config" in result.stdout
-    assert config_file.name in result.stdout
+    assert config_file.name in _without_rendered_line_breaks(result.stdout)
     assert "Traceback" not in result.stdout
     assert f"${{{missing_env}}}" in config_file.read_text(encoding="utf-8")
 
@@ -2528,7 +2528,7 @@ def test_webui_yes_still_refuses_invalid_custom_model_setup(
     assert "Settings → Models" in _without_rendered_line_breaks(result.stdout)
     assert "nanobot onboard --wizard" in result.stdout
     assert "nanobot status --config" in result.stdout
-    assert config_file.name in result.stdout
+    assert config_file.name in _without_rendered_line_breaks(result.stdout)
 
 
 def test_open_webui_browser_redacts_bootstrap_secret(monkeypatch, capsys) -> None:
