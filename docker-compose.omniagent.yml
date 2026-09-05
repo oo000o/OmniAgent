@@ -14,6 +14,7 @@ services:
         required: true
     environment:
       NANOBOT_CONFIG_TEMPLATE: /app/config/omniagent.json
+      NANOBOT_CONFIG_TEMPLATE_MODE: overwrite
     ports:
       - "127.0.0.1:8765:8765"
       - "127.0.0.1:18790:18790"

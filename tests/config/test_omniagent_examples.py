@@ -38,3 +38,9 @@ def test_docker_compose_publishes_local_web_and_health_ports() -> None:
     ports = compose["services"]["nanobot-gateway"]["ports"]
     assert "127.0.0.1:8765:8765" in ports
     assert "127.0.0.1:18790:18790" in ports
+    assert (
+        compose["services"]["nanobot-gateway"]["environment"][
+            "NANOBOT_CONFIG_TEMPLATE_MODE"
+        ]
+        == "overwrite"
+    )

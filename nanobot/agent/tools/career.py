@@ -376,7 +376,9 @@ class CareerWorkflowTransitionTool(_CareerTool):
     def description(self) -> str:
         return (
             "Persist one legal career-workflow transition with optimistic locking and "
-            "idempotency. Reload after a version conflict; never skip user confirmation."
+            "idempotency. The server preserves previously accepted evidence, gap analysis, "
+            "confirmation, task IDs, and follow-up IDs; supply only the new gap or plan data. "
+            "Reload after a version conflict; never skip user confirmation."
         )
 
     async def execute(
@@ -400,6 +402,23 @@ class CareerWorkflowTransitionTool(_CareerTool):
                     "protected state requires a dedicated tool backed by a real user or tool result"
                 )
             checkpoint = CareerCheckpoint.model_validate_json(checkpoint_json)
+            current = self._store.get(workflow_id)
+            protected_updates: dict[str, object] = {
+                "confirmed": current.checkpoint.confirmed,
+                "task_ids": current.checkpoint.task_ids,
+                "followup_job_id": current.checkpoint.followup_job_id,
+            }
+            if current.state is not CareerWorkflowState.DOCUMENTS_READY:
+                protected_updates["evidence"] = current.checkpoint.evidence
+            if current.state in {
+                CareerWorkflowState.GAP_READY,
+                CareerWorkflowState.AWAITING_CONFIRMATION,
+                CareerWorkflowState.TASKS_CREATING,
+                CareerWorkflowState.TASKS_CREATED,
+                CareerWorkflowState.FOLLOWUP_SCHEDULED,
+            }:
+                protected_updates["gaps"] = current.checkpoint.gaps
+            checkpoint = checkpoint.model_copy(update=protected_updates)
             request = CareerWorkflowTransition(
                 target_state=parsed_state,
                 checkpoint=checkpoint,
@@ -829,6 +848,15 @@ class CareerWorkflowConfirmTool(_CareerTool):
 
     _CONFIRMATION_PHRASE = "确认创建学习任务"
 
+    @classmethod
+    def _is_explicit_confirmation(cls, text: str) -> bool:
+        compact = "".join(text.split())
+        if any(negative in compact for negative in ("不确认", "暂不确认", "不要创建")):
+            return False
+        return cls._CONFIRMATION_PHRASE in compact or (
+            "明确确认" in compact and any(subject in compact for subject in ("学习计划", "任务"))
+        )
+
     def __init__(self, *, workspace: Path, config: CareerToolsConfig) -> None:
         super().__init__(workspace=workspace, config=config)
         self._request_context: RequestContext | None = None
@@ -844,7 +872,8 @@ class CareerWorkflowConfirmTool(_CareerTool):
     def description(self) -> str:
         return (
             "Confirm the displayed learning plan. The current user message must explicitly "
-            f"contain {self._CONFIRMATION_PHRASE!r}; model-generated arguments cannot replace it."
+            "confirm the learning plan or task creation; model-generated arguments cannot "
+            "replace the runtime-bound original user message."
         )
 
     async def execute(
@@ -853,7 +882,7 @@ class CareerWorkflowConfirmTool(_CareerTool):
         original_text = (
             self._request_context.original_user_text if self._request_context is not None else None
         )
-        if not original_text or self._CONFIRMATION_PHRASE not in original_text:
+        if not original_text or not self._is_explicit_confirmation(original_text):
             return ToolResult.error(
                 "Career workflow confirmation failed: explicit confirmation was not present "
                 "in the original user message"

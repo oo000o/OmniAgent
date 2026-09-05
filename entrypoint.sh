@@ -32,7 +32,10 @@ if [ -n "$NANOBOT_CONFIG_TEMPLATE" ]; then
         exit 1
     fi
     mkdir -p "$dir"
-    if [ ! -f "$config" ]; then
+    if [ "$NANOBOT_CONFIG_TEMPLATE_MODE" = "overwrite" ]; then
+        cp "$NANOBOT_CONFIG_TEMPLATE" "$config"
+        echo "[entrypoint] refreshed $config from $NANOBOT_CONFIG_TEMPLATE"
+    elif [ ! -f "$config" ]; then
         cp "$NANOBOT_CONFIG_TEMPLATE" "$config"
         echo "[entrypoint] initialized $config from $NANOBOT_CONFIG_TEMPLATE"
     fi

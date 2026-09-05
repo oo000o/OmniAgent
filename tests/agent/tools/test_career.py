@@ -205,6 +205,69 @@ async def test_retrieved_evidence_drives_gap_and_plan_checkpoints(tmp_path) -> N
     assert awaiting["checkpoint"]["gaps"] == gap_checkpoint["gaps"]
 
 
+async def test_transition_reuses_authoritative_immutable_evidence(tmp_path) -> None:
+    database_path = tmp_path / "state" / "career.db"
+    store = CareerWorkflowStore(database_path)
+    store.initialize()
+    current = store.create(
+        CareerWorkflowCreate(resume_source="resume.md", jd_source="jd.md"),
+        idempotency_key="workflow-canonical-evidence",
+    )
+    checkpoint = CareerCheckpoint(
+        evidence=[
+            EvidenceReference(
+                evidence_id="K1", source_type="jd", source_name="jd.md", chunk_id="c1"
+            )
+        ]
+    )
+    current = store.transition(
+        current.workflow_id,
+        CareerWorkflowTransition(
+            target_state=CareerWorkflowState.EVIDENCE_RETRIEVED,
+            checkpoint=checkpoint,
+        ),
+        expected_version=current.version,
+        idempotency_key="retrieved-canonical-evidence",
+    )
+    supplied = checkpoint.model_copy(
+        update={
+            "evidence": [
+                EvidenceReference(
+                    evidence_id="K1",
+                    source_type="jd",
+                    source_name="jd .md",
+                    chunk_id="c1",
+                )
+            ],
+            "gaps": [
+                GapItem(
+                    competency="RAG",
+                    status=GapStatus.MISSING,
+                    rationale="JD requires it.",
+                    evidence_ids=["K1"],
+                )
+            ],
+        }
+    )
+    transition = CareerWorkflowTransitionTool(
+        workspace=tmp_path,
+        config=CareerToolsConfig(database_path="state/career.db"),
+    )
+
+    result = json.loads(
+        await transition.execute(
+            current.workflow_id,
+            CareerWorkflowState.GAP_READY.value,
+            supplied.model_dump_json(),
+            current.version,
+            "gap-canonical-evidence",
+        )
+    )
+
+    assert result["state"] == CareerWorkflowState.GAP_READY
+    assert result["checkpoint"]["evidence"][0]["source_name"] == "jd.md"
+
+
 async def test_generic_transition_cannot_forge_confirmation(tmp_path) -> None:
     config = CareerToolsConfig(database_path="state/career.db")
     transition = CareerWorkflowTransitionTool(workspace=tmp_path, config=config)
@@ -236,6 +299,12 @@ async def test_confirmation_requires_runtime_bound_original_user_text(tmp_path) 
 
     assert "explicit confirmation was not present" in missing
     assert "explicit confirmation was not present" in forged
+
+
+def test_explicit_confirmation_accepts_natural_chinese_and_rejects_negation() -> None:
+    assert CareerWorkflowConfirmTool._is_explicit_confirmation("我明确确认这个学习计划")
+    assert CareerWorkflowConfirmTool._is_explicit_confirmation("确认创建学习任务")
+    assert not CareerWorkflowConfirmTool._is_explicit_confirmation("我暂不确认这个学习计划")
 
 
 async def test_explicit_user_confirmation_advances_displayed_plan(tmp_path) -> None:
