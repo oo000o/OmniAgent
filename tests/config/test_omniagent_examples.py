@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -27,3 +29,12 @@ def test_career_examples_allow_a_complete_tool_driven_workflow() -> None:
     for name in ("omniagent.config.example.json", "omniagent.docker.config.json"):
         config = _load(name)
         assert config["agents"]["defaults"]["maxToolIterations"] >= 40
+
+
+def test_docker_compose_publishes_local_web_and_health_ports() -> None:
+    with (ROOT / "docker-compose.omniagent.yml").open(encoding="utf-8") as handle:
+        compose = yaml.safe_load(handle)
+
+    ports = compose["services"]["nanobot-gateway"]["ports"]
+    assert "127.0.0.1:8765:8765" in ports
+    assert "127.0.0.1:18790:18790" in ports
