@@ -65,6 +65,10 @@ evidence_retrieved -> gaps_analyzed -> plan_proposed
 3. 任务 source 必须是 `career:<workflow_id>:<plan_item_id>`；
 4. 模型不能直接把任意 ID 写进检查点。
 
+求职工作流与任务 MCP 必须配置为同一个 SQLite 文件。例如 Docker 示例中，两者均使用
+`/data/workspace/.nanobot/tasks.db`。若指向不同文件，任务即使已被 MCP 创建，工作流也
+必须拒绝登记其 ID；这是事实源隔离错误，而不是可忽略的模型重试。
+
 ### 幂等与恢复
 
 任务创建使用稳定幂等键；如果 MCP 已写入 SQLite、进程却在检查点更新前退出，恢复时

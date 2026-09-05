@@ -3,7 +3,7 @@
     "defaults": {
       "unifiedSession": true,
       "timezone": "Asia/Shanghai",
-      "maxToolIterations": 12
+      "maxToolIterations": 40
     }
   },
   "channels": {
@@ -20,6 +20,11 @@
   },
   "tools": {
     "restrictToWorkspace": true,
+    "career": {
+      "enable": true,
+      "databasePath": ".nanobot/career.db",
+      "taskDatabasePath": ".nanobot/tasks.db"
+    },
     "knowledge": {
       "enable": true,
       "databasePath": ".nanobot/knowledge.db",
@@ -39,7 +44,7 @@
         "args": ["-m", "nanobot.tasking.mcp_server"],
         "cwd": "<PROJECT_ROOT>/source",
         "env": {
-          "OMNIAGENT_TASK_DB": "<PROJECT_ROOT>/data/tasks.db"
+          "OMNIAGENT_TASK_DB": "<PROJECT_ROOT>/source/workspace/.nanobot/tasks.db"
         },
         "enabledTools": [
           "task_create",
