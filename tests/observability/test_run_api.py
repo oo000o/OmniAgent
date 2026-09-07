@@ -39,6 +39,17 @@ async def test_run_list_and_detail_routes(tmp_path) -> None:
     )
     assert detail is not None and detail.status_code == 200
     assert json.loads(detail.body)["run"]["run_id"] == run_id
+    assert json.loads(detail.body)["trace"] == []
+
+    summary_request = Request("/api/omniagent/runs/summary", Headers())
+    summary = await handler._dispatch_misc_routes(
+        None, summary_request, "/api/omniagent/runs/summary"
+    )
+    assert summary is not None and summary.status_code == 200
+    body = json.loads(summary.body)
+    assert "sample_count" in body
+    assert "metrics" in body
+    assert "error_policy" in body
 
 
 async def test_run_routes_validate_limit_and_missing_id(tmp_path) -> None:

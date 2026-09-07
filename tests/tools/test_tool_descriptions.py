@@ -31,6 +31,7 @@ def test_coding_tool_descriptions_steer_discovery() -> None:
     grep = GrepTool().description.lower()
 
     assert "text, images, pdfs, and office documents" in read_file
+    assert "attachment paths verbatim" in read_file
     assert "line-numbered" in read_file
     assert "targeted ranges" in read_file
     assert len(read_file) < 160

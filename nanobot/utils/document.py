@@ -695,7 +695,12 @@ def reference_non_image_attachments(
         if is_image_file(path):
             image_paths.append(path)
         else:
-            attachment_refs.append(f"[Attachment: {path}]")
+            attachment_refs.extend((
+                f"[Attachment: {path}]",
+                "[Attachment status: newly received in this turn. Before relying on its "
+                "contents, inspect this exact path with read_file; do not reuse an earlier "
+                "read of a similarly named file.]",
+            ))
     if attachment_refs:
         suffix = "\n".join(attachment_refs)
         content = f"{content}\n\n{suffix}" if content else suffix

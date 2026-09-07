@@ -35,7 +35,17 @@ _ALLOWED_TRANSITIONS: dict[CareerWorkflowState, frozenset[CareerWorkflowState]] 
         {CareerWorkflowState.GAP_READY, CareerWorkflowState.FAILED}
     ),
     CareerWorkflowState.GAP_READY: frozenset(
-        {CareerWorkflowState.AWAITING_CONFIRMATION, CareerWorkflowState.FAILED}
+        {CareerWorkflowState.PLAN_VERIFYING, CareerWorkflowState.FAILED}
+    ),
+    CareerWorkflowState.PLAN_VERIFYING: frozenset(
+        {
+            CareerWorkflowState.AWAITING_CONFIRMATION,
+            CareerWorkflowState.REPLANNING,
+            CareerWorkflowState.FAILED,
+        }
+    ),
+    CareerWorkflowState.REPLANNING: frozenset(
+        {CareerWorkflowState.PLAN_VERIFYING, CareerWorkflowState.FAILED}
     ),
     CareerWorkflowState.AWAITING_CONFIRMATION: frozenset(
         {CareerWorkflowState.TASKS_CREATING, CareerWorkflowState.FAILED}
@@ -55,6 +65,8 @@ _ALLOWED_TRANSITIONS: dict[CareerWorkflowState, frozenset[CareerWorkflowState]] 
             CareerWorkflowState.DOCUMENTS_READY,
             CareerWorkflowState.EVIDENCE_RETRIEVED,
             CareerWorkflowState.GAP_READY,
+            CareerWorkflowState.PLAN_VERIFYING,
+            CareerWorkflowState.REPLANNING,
             CareerWorkflowState.AWAITING_CONFIRMATION,
             CareerWorkflowState.TASKS_CREATING,
             CareerWorkflowState.TASKS_CREATED,
@@ -231,6 +243,8 @@ class CareerWorkflowStore:
                 current.state
                 in {
                     CareerWorkflowState.GAP_READY,
+                    CareerWorkflowState.PLAN_VERIFYING,
+                    CareerWorkflowState.REPLANNING,
                     CareerWorkflowState.AWAITING_CONFIRMATION,
                     CareerWorkflowState.TASKS_CREATING,
                     CareerWorkflowState.TASKS_CREATED,
@@ -275,6 +289,8 @@ class CareerWorkflowStore:
             CareerWorkflowState.DOCUMENTS_READY,
             CareerWorkflowState.EVIDENCE_RETRIEVED,
             CareerWorkflowState.GAP_READY,
+            CareerWorkflowState.PLAN_VERIFYING,
+            CareerWorkflowState.REPLANNING,
             CareerWorkflowState.AWAITING_CONFIRMATION,
         } and checkpoint.confirmed:
             raise ValueError("confirmation may only be recorded by the confirmation step")
@@ -282,6 +298,8 @@ class CareerWorkflowStore:
             CareerWorkflowState.DOCUMENTS_READY,
             CareerWorkflowState.EVIDENCE_RETRIEVED,
             CareerWorkflowState.GAP_READY,
+            CareerWorkflowState.PLAN_VERIFYING,
+            CareerWorkflowState.REPLANNING,
             CareerWorkflowState.AWAITING_CONFIRMATION,
             CareerWorkflowState.TASKS_CREATING,
         } and checkpoint.task_ids:
@@ -295,6 +313,8 @@ class CareerWorkflowStore:
         if state in {
             CareerWorkflowState.EVIDENCE_RETRIEVED,
             CareerWorkflowState.GAP_READY,
+            CareerWorkflowState.PLAN_VERIFYING,
+            CareerWorkflowState.REPLANNING,
             CareerWorkflowState.AWAITING_CONFIRMATION,
             CareerWorkflowState.TASKS_CREATING,
             CareerWorkflowState.TASKS_CREATED,
@@ -304,6 +324,8 @@ class CareerWorkflowStore:
             raise ValueError("retrieved workflow states require evidence")
         if state in {
             CareerWorkflowState.GAP_READY,
+            CareerWorkflowState.PLAN_VERIFYING,
+            CareerWorkflowState.REPLANNING,
             CareerWorkflowState.AWAITING_CONFIRMATION,
             CareerWorkflowState.TASKS_CREATING,
             CareerWorkflowState.TASKS_CREATED,
@@ -312,6 +334,8 @@ class CareerWorkflowStore:
         } and not checkpoint.gaps:
             raise ValueError("gap workflow states require gap items")
         if state in {
+            CareerWorkflowState.PLAN_VERIFYING,
+            CareerWorkflowState.REPLANNING,
             CareerWorkflowState.AWAITING_CONFIRMATION,
             CareerWorkflowState.TASKS_CREATING,
             CareerWorkflowState.TASKS_CREATED,
@@ -320,12 +344,30 @@ class CareerWorkflowStore:
         } and not checkpoint.plan:
             raise ValueError("planning workflow states require learning plan items")
         if state in {
+            CareerWorkflowState.PLAN_VERIFYING,
+            CareerWorkflowState.AWAITING_CONFIRMATION,
+            CareerWorkflowState.TASKS_CREATING,
+            CareerWorkflowState.TASKS_CREATED,
+            CareerWorkflowState.FOLLOWUP_SCHEDULED,
+            CareerWorkflowState.COMPLETED,
+        } and checkpoint.verification_errors:
+            raise ValueError("a plan with verification errors cannot advance")
+        if state is CareerWorkflowState.REPLANNING and not checkpoint.verification_errors:
+            raise ValueError("replanning requires verifier errors")
+        if state in {
             CareerWorkflowState.TASKS_CREATING,
             CareerWorkflowState.TASKS_CREATED,
             CareerWorkflowState.FOLLOWUP_SCHEDULED,
             CareerWorkflowState.COMPLETED,
         } and not checkpoint.confirmed:
             raise ValueError("task creation requires user confirmation")
+        if state in {
+            CareerWorkflowState.TASKS_CREATING,
+            CareerWorkflowState.TASKS_CREATED,
+            CareerWorkflowState.FOLLOWUP_SCHEDULED,
+            CareerWorkflowState.COMPLETED,
+        } and checkpoint.confirmed_plan_revision != checkpoint.plan_revision:
+            raise ValueError("task creation requires confirmation of the current plan revision")
         if state in {
             CareerWorkflowState.TASKS_CREATED,
             CareerWorkflowState.FOLLOWUP_SCHEDULED,

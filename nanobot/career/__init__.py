@@ -10,6 +10,7 @@ from nanobot.career.models import (
     GapItem,
     GapStatus,
     LearningPlanItem,
+    ReplanRecord,
 )
 from nanobot.career.store import (
     CareerWorkflowConflictError,
@@ -30,4 +31,5 @@ __all__ = [
     "GapItem",
     "GapStatus",
     "LearningPlanItem",
+    "ReplanRecord",
 ]

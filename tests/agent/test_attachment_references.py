@@ -72,7 +72,8 @@ async def test_document_attachment_is_referenced_and_read_on_demand(
 
     await loop._restore_turn(ctx)
 
-    assert ctx.msg.content == f"import this report\n\n[Attachment: {csv_path}]"
+    assert ctx.msg.content.startswith(f"import this report\n\n[Attachment: {csv_path}]")
+    assert "newly received in this turn" in ctx.msg.content
     assert "name,value" not in ctx.msg.content
     assert ctx.msg.media == []
 
@@ -108,9 +109,10 @@ async def test_document_reference_survives_session_reload(tmp_path: Path) -> Non
     persisted = loop.sessions.get_or_create(session_key)
 
     assert [message["role"] for message in persisted.messages] == ["user"]
-    assert persisted.messages[0]["content"] == (
+    assert persisted.messages[0]["content"].startswith(
         f"review this\n\n[Attachment: {doc_path.resolve()}]"
     )
+    assert "newly received in this turn" in persisted.messages[0]["content"]
     assert "media" not in persisted.messages[0]
 
 

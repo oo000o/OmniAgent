@@ -936,6 +936,21 @@ class _FeishuStreamBuf:
     last_edit: float = 0.0
 
 
+@dataclass
+class _PendingFeishuAttachment:
+    """Downloaded file waiting briefly for the user's accompanying text."""
+
+    sender_id: str
+    chat_id: str
+    inbound_lock_key: str
+    content: str
+    media: list[str]
+    metadata: dict[str, Any]
+    session_key: str | None
+    is_dm: bool
+    flush_task: asyncio.Task[Any] | None = None
+
+
 class FeishuChannel(BaseChannel):
     """
     Feishu/Lark channel using WebSocket long connection.
@@ -952,6 +967,7 @@ class FeishuChannel(BaseChannel):
     display_name = "Feishu"
 
     _STREAM_EDIT_INTERVAL = 0.5  # throttle between CardKit streaming updates
+    _FILE_FOLLOWUP_WINDOW = 15.0
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -986,6 +1002,11 @@ class FeishuChannel(BaseChannel):
         self._bot_open_id: str | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._reaction_ids: dict[str, str] = {}  # message_id → reaction_id
+        # Feishu delivers a file and the user's follow-up text as separate events.
+        # Downloading the file can otherwise let the later text overtake it and
+        # start an agent turn with a stale attachment from session history.
+        self._inbound_message_locks: dict[str, asyncio.Lock] = {}
+        self._pending_file_attachments: dict[str, _PendingFeishuAttachment] = {}
 
     # ------------------------------------------------------------------
     # QR login — writes credentials directly to config.json
@@ -1156,6 +1177,10 @@ class FeishuChannel(BaseChannel):
         Reference: https://github.com/larksuite/oapi-sdk-python/blob/v2_main/lark_oapi/ws/client.py#L86
         """
         self._running = False
+        for pending in self._pending_file_attachments.values():
+            if pending.flush_task is not None:
+                pending.flush_task.cancel()
+        self._pending_file_attachments.clear()
         await self._ws_runner.stop_client(self.name)
         self.logger.info("bot stopped")
 
@@ -1819,6 +1844,21 @@ class FeishuChannel(BaseChannel):
             return safe_filename(fallback) or uuid.uuid4().hex
         return candidate
 
+    @staticmethod
+    def _unused_media_path(media_dir: Path, filename: str, message_id: str | None) -> Path:
+        """Keep repeated uploads distinct instead of overwriting session evidence."""
+        candidate = media_dir / filename
+        if not candidate.exists():
+            return candidate
+        source = Path(filename)
+        token = safe_filename(message_id or uuid.uuid4().hex)[:12] or uuid.uuid4().hex[:12]
+        candidate = media_dir / f"{source.stem}--{token}{source.suffix}"
+        counter = 2
+        while candidate.exists():
+            candidate = media_dir / f"{source.stem}--{token}-{counter}{source.suffix}"
+            counter += 1
+        return candidate
+
     async def _download_and_save_media(
         self, msg_type: str, content_json: dict[str, Any], message_id: str | None = None
     ) -> tuple[str | None, str]:
@@ -1873,7 +1913,7 @@ class FeishuChannel(BaseChannel):
 
         if data and filename:
             filename = self._safe_media_filename(filename, fallback_filename)
-            file_path = media_dir / filename
+            file_path = self._unused_media_path(media_dir, filename, message_id)
             file_path.write_bytes(data)
             path_str = str(file_path)
             self.logger.debug("Downloaded {} to {}", msg_type, path_str)
@@ -2612,7 +2652,132 @@ class FeishuChannel(BaseChannel):
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._on_message(data), self._loop)
 
+    @staticmethod
+    def _attachment_key(sender_id: str, chat_id: str) -> str:
+        return f"{chat_id}:{sender_id}"
+
+    async def _flush_pending_file(
+        self,
+        key: str,
+        pending: _PendingFeishuAttachment,
+    ) -> None:
+        """Publish a bare file when no accompanying text arrives in time."""
+        await asyncio.sleep(self._FILE_FOLLOWUP_WINDOW)
+        lock = self._inbound_message_locks.setdefault(pending.inbound_lock_key, asyncio.Lock())
+        async with lock:
+            if self._pending_file_attachments.get(key) is not pending:
+                return
+            self._pending_file_attachments.pop(key, None)
+            await self._handle_message(
+                sender_id=pending.sender_id,
+                chat_id=pending.chat_id,
+                content=pending.content,
+                media=pending.media,
+                metadata=pending.metadata,
+                session_key=pending.session_key,
+                is_dm=pending.is_dm,
+            )
+
+    def _queue_pending_file(
+        self,
+        *,
+        key: str,
+        sender_id: str,
+        chat_id: str,
+        inbound_lock_key: str,
+        content: str,
+        media: list[str],
+        metadata: dict[str, Any],
+        session_key: str | None,
+        is_dm: bool,
+    ) -> None:
+        """Debounce a downloaded file so a following instruction can join it."""
+        previous = self._pending_file_attachments.get(key)
+        if previous is not None:
+            if previous.flush_task is not None:
+                previous.flush_task.cancel()
+            content = "\n".join(part for part in (previous.content, content) if part)
+            media = [*previous.media, *(path for path in media if path not in previous.media)]
+            raw_message_ids = previous.metadata.get("attachment_message_ids")
+            message_ids: list[str] = (
+                [
+                    item
+                    for item in cast(list[object], raw_message_ids)
+                    if isinstance(item, str)
+                ]
+                if isinstance(raw_message_ids, list)
+                else []
+            )
+        else:
+            message_ids = []
+
+        raw_message_id = metadata.get("message_id")
+        if isinstance(raw_message_id, str):
+            message_ids = [*message_ids, raw_message_id]
+        metadata = {**metadata, "attachment_message_ids": message_ids}
+        pending = _PendingFeishuAttachment(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            inbound_lock_key=inbound_lock_key,
+            content=content,
+            media=media,
+            metadata=metadata,
+            session_key=session_key,
+            is_dm=is_dm,
+        )
+        task = asyncio.create_task(self._flush_pending_file(key, pending))
+        pending.flush_task = task
+        self._pending_file_attachments[key] = pending
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_task_done)
+
+    def _merge_pending_file(
+        self,
+        key: str,
+        content: str,
+        media: list[str],
+        metadata: dict[str, Any],
+    ) -> tuple[str, list[str], dict[str, Any]]:
+        """Merge a queued file into the next text message from the same user/chat."""
+        pending = self._pending_file_attachments.pop(key, None)
+        if pending is None:
+            return content, media, metadata
+        if pending.flush_task is not None:
+            pending.flush_task.cancel()
+        merged_content = "\n".join(part for part in (pending.content, content) if part)
+        merged_media = [*pending.media, *(path for path in media if path not in pending.media)]
+        raw_attachment_ids = pending.metadata.get("attachment_message_ids")
+        attachment_ids = (
+            [
+                item
+                for item in cast(list[object], raw_attachment_ids)
+                if isinstance(item, str)
+            ]
+            if isinstance(raw_attachment_ids, list)
+            else []
+        )
+        return (
+            merged_content,
+            merged_media,
+            {**metadata, "attachment_message_ids": attachment_ids},
+        )
+
     async def _on_message(self, data: P2ImMessageReceiveV1) -> None:
+        """Preserve Feishu event order within one conversation.
+
+        In particular, a file event must finish downloading and publishing before
+        a following text event can be published for the same chat.  Other chats
+        continue to be processed concurrently.
+        """
+        event = getattr(data, "event", None)
+        message = getattr(event, "message", None)
+        chat_id = getattr(message, "chat_id", None)
+        lock_key = chat_id if isinstance(chat_id, str) and chat_id else "__incomplete__"
+        lock = self._inbound_message_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            await self._process_message(data)
+
+    async def _process_message(self, data: P2ImMessageReceiveV1) -> None:
         """Handle incoming message from Feishu."""
         if not self._running:
             return
@@ -2796,19 +2961,41 @@ class FeishuChannel(BaseChannel):
 
             # Forward to message bus
             reply_to = chat_id if chat_type == "group" else sender_id
+            metadata = {
+                "message_id": message_id,
+                "chat_type": chat_type,
+                "msg_type": msg_type,
+                "parent_id": parent_id,
+                "root_id": root_id,
+                "thread_id": thread_id,
+            }
+            attachment_key = self._attachment_key(sender_id, chat_id)
+            if msg_type == "file" and media_paths:
+                self._queue_pending_file(
+                    key=attachment_key,
+                    sender_id=sender_id,
+                    chat_id=reply_to,
+                    inbound_lock_key=chat_id,
+                    content=content,
+                    media=media_paths,
+                    metadata=metadata,
+                    session_key=session_key,
+                    is_dm=chat_type == "p2p",
+                )
+                return
+            if msg_type == "text":
+                content, media_paths, metadata = self._merge_pending_file(
+                    attachment_key,
+                    content,
+                    media_paths,
+                    metadata,
+                )
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=reply_to,
                 content=content,
                 media=media_paths,
-                metadata={
-                    "message_id": message_id,
-                    "chat_type": chat_type,
-                    "msg_type": msg_type,
-                    "parent_id": parent_id,
-                    "root_id": root_id,
-                    "thread_id": thread_id,
-                },
+                metadata=metadata,
                 session_key=session_key,
                 is_dm=chat_type == "p2p",
             )

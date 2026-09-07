@@ -80,3 +80,48 @@ async def test_error_survives_completion_event(tmp_path) -> None:
     record = store.list()[0]
     assert record.status == "error"
     assert record.error == "provider unavailable"
+
+
+async def test_tool_trace_and_aggregate_metrics(tmp_path) -> None:
+    store = RunStore(tmp_path / "runs.db")
+    store.initialize()
+    context = RuntimeEventContext(channel="webui", chat_id="c1", session_key="obs:metrics")
+    store.handle(SessionTurnStarted(context))
+    started = store.begin_tool_call(
+        "obs:metrics",
+        tool_name="career_workflow_replan",
+        workflow_id="11111111-2222-3333-4444-555555555555",
+        plan_revision=1,
+    )
+    assert started is not None
+    store.finish_tool_call(started, status="succeeded", flags=("replan",), plan_revision=2)
+    store.record_span(
+        "obs:metrics",
+        event_type="replan_accepted",
+        status="succeeded",
+        tool_name="career_workflow_replan",
+        flags=("replan",),
+    )
+    store.handle(
+        TurnCompleted(
+            context,
+            latency_ms=40,
+            usage=LLMUsage(
+                input_tokens=10, output_tokens=10, total_tokens=20, reported_tokens=20
+            ),
+        )
+    )
+
+    events = store.list_events(store.list()[0].run_id)
+    types = [event.event_type for event in events]
+    assert "tool_succeeded" in types
+    assert "replan_accepted" in types
+    summary = store.aggregate(session_key="obs:metrics")
+    assert summary["sample_count"] == 1
+    assert summary["metrics"]["run_success_rate"] == 1.0
+    assert summary["metrics"]["tool_success_rate"] == 1.0
+    assert summary["metrics"]["replan_success_rate"] == 1.0
+    assert "p95_latency_ms" in summary["metrics"]
+    dumped = (tmp_path / "runs.db").read_bytes()
+    assert b"resume" not in dumped or b"11111111-2222-3333-4444-555555555555" in dumped
+

@@ -12,7 +12,7 @@ from typing import Any
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.file_state import FileStates, _hash_file, current_file_states
-from nanobot.agent.tools.path_utils import resolve_workspace_path
+from nanobot.agent.tools.path_utils import resolve_unique_media_file, resolve_workspace_path
 from nanobot.agent.tools.schema import (
     BooleanSchema,
     IntegerSchema,
@@ -282,7 +282,8 @@ class ReadFileTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            "Read text, images, PDFs, and Office documents by path. "
+            "Read text, images, PDFs, and Office documents. "
+            "Copy attachment paths verbatim. "
             "Text is line-numbered; use offset/limit or pages for targeted ranges."
         )
 
@@ -309,7 +310,7 @@ class ReadFileTool(_FsTool):
 
             fp = self._resolve_read(path)
             if not fp.exists():
-                fp = _builtin_skill_read_path(path) or fp
+                fp = _builtin_skill_read_path(path) or resolve_unique_media_file(fp) or fp
             if _is_blocked_device(fp):
                 return ToolResult.error(f"Error: Reading {fp} is blocked (device path that could hang or produce infinite output).")
             if not fp.exists():

@@ -245,6 +245,53 @@ class TestReadPdf:
         assert "Error" in result
         assert "not found" in result
 
+    @pytest.mark.asyncio
+    async def test_media_pdf_recovers_unique_spacing_change(
+        self, tmp_path, monkeypatch
+    ):
+        fitz = pytest.importorskip("fitz")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        media_dir = tmp_path / "media" / "feishu"
+        media_dir.mkdir(parents=True)
+        pdf_path = media_dir / "简历-范懿(2).pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Attachment PDF")
+        doc.save(str(pdf_path))
+        doc.close()
+        monkeypatch.setattr(
+            "nanobot.agent.tools.path_utils.get_media_dir",
+            lambda: media_dir.parent,
+        )
+        tool = ReadFileTool(workspace=workspace, allowed_dir=workspace)
+
+        result = await tool.execute(path=str(media_dir / "简历 - 范懿 (2).pdf"))
+
+        assert "Attachment PDF" in result
+        assert "not found" not in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_media_filename_recovery_rejects_ambiguous_matches(
+        self, tmp_path, monkeypatch
+    ):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        media_dir = tmp_path / "media" / "feishu"
+        media_dir.mkdir(parents=True)
+        (media_dir / "简历-范懿(2).pdf").write_bytes(b"first")
+        (media_dir / "简历 - 范懿(2).pdf").write_bytes(b"second")
+        monkeypatch.setattr(
+            "nanobot.agent.tools.path_utils.get_media_dir",
+            lambda: media_dir.parent,
+        )
+        tool = ReadFileTool(workspace=workspace, allowed_dir=workspace)
+
+        result = await tool.execute(path=str(media_dir / "简历-范懿 (2).pdf"))
+
+        assert "Error" in result
+        assert "not found" in result.lower()
+
 
 # ---------------------------------------------------------------------------
 # Device path blacklist

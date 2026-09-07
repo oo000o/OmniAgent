@@ -29,8 +29,15 @@ def _checkpoint(*, confirmed: bool = False) -> CareerCheckpoint:
                 evidence_ids=["K1"],
             )
         ],
-        plan=[LearningPlanItem(item_id="rag-eval", title="Build a RAG evaluation set")],
+        plan=[
+            LearningPlanItem(
+                item_id="rag-eval",
+                title="Build a RAG evaluation set",
+                addresses=["RAG evaluation"],
+            )
+        ],
         confirmed=confirmed,
+        confirmed_plan_revision=1 if confirmed else None,
     )
 
 
@@ -47,6 +54,18 @@ def test_create_is_idempotent_and_survives_reopen(tmp_path) -> None:
 
     assert replay.workflow_id == first.workflow_id
     assert reopened.get(first.workflow_id) == first
+
+
+def test_legacy_confirmed_checkpoint_backfills_plan_revision() -> None:
+    checkpoint = CareerCheckpoint.model_validate(
+        {
+            **_checkpoint().model_dump(mode="json"),
+            "confirmed": True,
+            "confirmed_plan_revision": None,
+        }
+    )
+
+    assert checkpoint.confirmed_plan_revision == checkpoint.plan_revision == 1
 
 
 def test_workflow_rejects_skipped_state_and_stale_version(tmp_path) -> None:
@@ -100,6 +119,7 @@ def test_task_creation_requires_confirmation_and_real_task_ids(tmp_path) -> None
     for state, key in (
         (CareerWorkflowState.EVIDENCE_RETRIEVED, "evidence"),
         (CareerWorkflowState.GAP_READY, "gap"),
+        (CareerWorkflowState.PLAN_VERIFYING, "plan-verifying"),
         (CareerWorkflowState.AWAITING_CONFIRMATION, "plan"),
     ):
         current = store.transition(

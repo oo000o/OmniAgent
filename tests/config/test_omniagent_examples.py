@@ -9,6 +9,16 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class _ComposeLoader(yaml.SafeLoader):
+    """Load Docker Compose sequence override tags as their YAML value."""
+
+
+_ComposeLoader.add_constructor(
+    "!override",
+    lambda loader, node: loader.construct_sequence(node),
+)
+
+
 def _load(name: str) -> dict[str, Any]:
     with (ROOT / "examples" / name).open(encoding="utf-8") as handle:
         return json.load(handle)
@@ -32,10 +42,11 @@ def test_career_examples_allow_a_complete_tool_driven_workflow() -> None:
 
 
 def test_docker_compose_publishes_local_web_and_health_ports() -> None:
-    with (ROOT / "docker-compose.omniagent.yml").open(encoding="utf-8") as handle:
-        compose = yaml.safe_load(handle)
+    compose_text = (ROOT / "docker-compose.omniagent.yml").read_text(encoding="utf-8")
+    compose = yaml.load(compose_text, Loader=_ComposeLoader)
 
     ports = compose["services"]["nanobot-gateway"]["ports"]
+    assert "ports: !override" in compose_text
     assert "127.0.0.1:8765:8765" in ports
     assert "127.0.0.1:18790:18790" in ports
     assert (
@@ -44,3 +55,12 @@ def test_docker_compose_publishes_local_web_and_health_ports() -> None:
         ]
         == "overwrite"
     )
+
+
+def test_entrypoint_refreshes_config_atomically_and_fails_closed() -> None:
+    entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+
+    assert "copy_config_atomically" in entrypoint
+    assert 'mv -f "$temporary_path" "$target_path"' in entrypoint
+    assert "error: failed to refresh" in entrypoint
+    assert "exit 1" in entrypoint

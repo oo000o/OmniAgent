@@ -1154,6 +1154,8 @@ class GatewayHTTPHandler:
             return await self._handle_sessions_list(request)
         if got == "/api/omniagent/runs":
             return self._handle_omniagent_runs(request)
+        if got == "/api/omniagent/runs/summary":
+            return self._handle_omniagent_run_summary(request)
         run_match = re.match(r"^/api/omniagent/runs/([a-f0-9]{32})$", got)
         if run_match:
             return self._handle_omniagent_run_detail(request, run_match.group(1))
@@ -1201,6 +1203,15 @@ class GatewayHTTPHandler:
             return _http_error(400, str(exc))
         return _http_json_response({"runs": [run.to_dict() for run in runs]})
 
+    def _handle_omniagent_run_summary(self, request: WsRequest) -> Response:
+        if not self.check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        if self.omniagent_run_store is None:
+            return _http_error(503, "run observability is unavailable")
+        query = _parse_query(request.path)
+        session_key = _query_first(query, "session_key")
+        return _http_json_response(self.omniagent_run_store.aggregate(session_key=session_key))
+
     def _handle_omniagent_run_detail(self, request: WsRequest, run_id: str) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
@@ -1209,7 +1220,12 @@ class GatewayHTTPHandler:
         run = self.omniagent_run_store.get(run_id)
         if run is None:
             return _http_error(404, "run not found")
-        return _http_json_response({"run": run.to_dict()})
+        return _http_json_response(
+            {
+                "run": run.to_dict(),
+                "trace": [event.to_dict() for event in self.omniagent_run_store.list_events(run_id)],
+            }
+        )
 
     def _handle_commands(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):

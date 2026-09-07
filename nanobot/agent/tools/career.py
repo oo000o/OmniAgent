@@ -5,10 +5,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, TypeAdapter, ValidationError, field_validator
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import RequestContext, ToolContext, current_request_context
@@ -24,6 +25,9 @@ from nanobot.career import (
     CareerWorkflowStore,
     CareerWorkflowTransition,
     EvidenceReference,
+    GapStatus,
+    LearningPlanItem,
+    ReplanRecord,
 )
 from nanobot.config_base import Base
 from nanobot.knowledge import (
@@ -35,6 +39,7 @@ from nanobot.knowledge import (
     OpenAICompatibleEmbeddingProvider,
 )
 from nanobot.knowledge.ingest import KnowledgeIngestionError, ingest_document
+from nanobot.observability.errors import AgentErrorCode, classify_exception, format_error
 from nanobot.session.keys import UNIFIED_SESSION_KEY
 from nanobot.tasking import TaskConflictError, TaskNotFoundError, TaskStatus, TaskStore
 
@@ -89,6 +94,10 @@ class _CareerTool(Tool):
         self._task_store = TaskStore(task_database_path)
         self._task_store.initialize()
 
+    @staticmethod
+    def _fail(prefix: str, exc: BaseException) -> ToolResult:
+        return ToolResult.error(format_error(classify_exception(exc), f"{prefix}: {exc}"))
+
     def _document(self, path: str) -> Path:
         source = resolve_workspace_path(path, self._workspace, self._workspace)
         if not source.is_file():
@@ -129,8 +138,8 @@ class CareerWorkflowStartTool(_CareerTool):
                 ),
                 idempotency_key=idempotency_key,
             )
-        except (CareerWorkflowConflictError, OSError, ValueError) as exc:
-            return ToolResult.error(f"Career workflow creation failed: {exc}")
+        except (CareerWorkflowConflictError, OSError, ValueError, sqlite3.Error) as exc:
+            return self._fail("Career workflow creation failed", exc)
         return workflow.model_dump_json()
 
 
@@ -157,7 +166,7 @@ class CareerWorkflowGetTool(_CareerTool):
         try:
             return self._store.get(workflow_id).model_dump_json()
         except CareerWorkflowNotFoundError as exc:
-            return ToolResult.error(str(exc))
+            return self._fail("Career workflow lookup failed", exc)
 
 
 @tool_parameters(
@@ -231,6 +240,7 @@ class CareerWorkflowRetrieveTool(_CareerTool):
         expected_version: int,
         idempotency_key: str,
     ) -> str:
+        used_fallback = False
         try:
             parsed_queries: object = json.loads(queries_json)
             if not isinstance(parsed_queries, list):
@@ -246,16 +256,18 @@ class CareerWorkflowRetrieveTool(_CareerTool):
             current = self._store.get(workflow_id)
             resume = self._document(current.resume_source)
             jd = self._document(current.jd_source)
-            for source in (resume, jd):
-                await self._index(source)
-
             allowed_paths: dict[Path, Literal["resume", "jd"]] = {
                 resume.resolve(): "resume",
                 jd.resolve(): "jd",
             }
             unique_results: dict[str, KnowledgeSearchResult] = {}
+            used_fallback = False
+            for source in (resume, jd):
+                used_fallback = await self._index(source) or used_fallback
             for query in queries:
-                for result in await self._search(query):
+                hits, query_fallback = await self._search(query)
+                used_fallback = used_fallback or query_fallback
+                for result in hits:
                     if result.source_path.resolve() in allowed_paths:
                         unique_results.setdefault(result.chunk.chunk_id, result)
             if not unique_results:
@@ -300,28 +312,38 @@ class CareerWorkflowRetrieveTool(_CareerTool):
             KnowledgeIngestionError,
             OSError,
             ValueError,
+            sqlite3.Error,
         ) as exc:
-            return ToolResult.error(f"Career evidence retrieval failed: {exc}")
+            return self._fail("Career evidence retrieval failed", exc)
         return json.dumps(
-            {"workflow": workflow.model_dump(mode="json"), "evidence": evidence_payload},
+            {
+                "workflow": workflow.model_dump(mode="json"),
+                "evidence": evidence_payload,
+                "retrieval_fallback": used_fallback,
+            },
             ensure_ascii=False,
         )
 
-    async def _index(self, source: Path) -> None:
+    async def _index(self, source: Path) -> bool:
         if self._retriever is None:
             ingest_document(source, self._knowledge_store)
-            return
+            return False
         try:
             await self._retriever.index_document(source)
+            return False
         except EmbeddingProviderError:
             if not self._knowledge_config.fallback_to_lexical:
                 raise
             ingest_document(source, self._knowledge_store)
+            return True
 
-    async def _search(self, query: str) -> list[KnowledgeSearchResult]:
+    async def _search(self, query: str) -> tuple[list[KnowledgeSearchResult], bool]:
         if self._retriever is None:
-            return self._knowledge_store.search_lexical(
-                query, limit=self._knowledge_config.candidate_results
+            return (
+                self._knowledge_store.search_lexical(
+                    query, limit=self._knowledge_config.candidate_results
+                ),
+                False,
             )
         try:
             fused = await self._retriever.search(
@@ -329,12 +351,15 @@ class CareerWorkflowRetrieveTool(_CareerTool):
                 limit=self._knowledge_config.candidate_results,
                 candidate_limit=self._knowledge_config.candidate_results,
             )
-            return [item.result for item in fused]
+            return [item.result for item in fused], False
         except EmbeddingProviderError:
             if not self._knowledge_config.fallback_to_lexical:
                 raise
-            return self._knowledge_store.search_lexical(
-                query, limit=self._knowledge_config.candidate_results
+            return (
+                self._knowledge_store.search_lexical(
+                    query, limit=self._knowledge_config.candidate_results
+                ),
+                True,
             )
 
 
@@ -376,9 +401,11 @@ class CareerWorkflowTransitionTool(_CareerTool):
     def description(self) -> str:
         return (
             "Persist one legal career-workflow transition with optimistic locking and "
-            "idempotency. The server preserves previously accepted evidence, gap analysis, "
-            "confirmation, task IDs, and follow-up IDs; supply only the new gap or plan data. "
-            "Reload after a version conflict; never skip user confirmation."
+            "idempotency. Use it to submit gap analysis, then a candidate plan to "
+            "plan_verifying. The server owns accepted evidence, confirmation, revisions, "
+            "verification results, task receipts, and follow-up IDs. A candidate plan must "
+            "list the exact gap competency strings it addresses. Reload after a version "
+            "conflict; never skip verification or user confirmation."
         )
 
     async def execute(
@@ -391,6 +418,8 @@ class CareerWorkflowTransitionTool(_CareerTool):
     ) -> str:
         try:
             protected = {
+                CareerWorkflowState.REPLANNING,
+                CareerWorkflowState.AWAITING_CONFIRMATION,
                 CareerWorkflowState.TASKS_CREATING,
                 CareerWorkflowState.TASKS_CREATED,
                 CareerWorkflowState.FOLLOWUP_SCHEDULED,
@@ -401,10 +430,18 @@ class CareerWorkflowTransitionTool(_CareerTool):
                 raise ValueError(
                     "protected state requires a dedicated tool backed by a real user or tool result"
                 )
-            checkpoint = CareerCheckpoint.model_validate_json(checkpoint_json)
+            raw_checkpoint: object = json.loads(checkpoint_json)
+            if not isinstance(raw_checkpoint, dict):
+                raise ValueError("checkpoint_json must contain a JSON object")
+            checkpoint_fields = cast(dict[str, object], raw_checkpoint)
             current = self._store.get(workflow_id)
             protected_updates: dict[str, object] = {
                 "confirmed": current.checkpoint.confirmed,
+                "confirmed_plan_revision": current.checkpoint.confirmed_plan_revision,
+                "plan_revision": current.checkpoint.plan_revision,
+                "replan_count": current.checkpoint.replan_count,
+                "replan_history": current.checkpoint.replan_history,
+                "verification_errors": current.checkpoint.verification_errors,
                 "task_ids": current.checkpoint.task_ids,
                 "followup_job_id": current.checkpoint.followup_job_id,
             }
@@ -412,13 +449,17 @@ class CareerWorkflowTransitionTool(_CareerTool):
                 protected_updates["evidence"] = current.checkpoint.evidence
             if current.state in {
                 CareerWorkflowState.GAP_READY,
+                CareerWorkflowState.PLAN_VERIFYING,
+                CareerWorkflowState.REPLANNING,
                 CareerWorkflowState.AWAITING_CONFIRMATION,
                 CareerWorkflowState.TASKS_CREATING,
                 CareerWorkflowState.TASKS_CREATED,
                 CareerWorkflowState.FOLLOWUP_SCHEDULED,
             }:
                 protected_updates["gaps"] = current.checkpoint.gaps
-            checkpoint = checkpoint.model_copy(update=protected_updates)
+            checkpoint = CareerCheckpoint.model_validate(
+                {**checkpoint_fields, **protected_updates}
+            )
             request = CareerWorkflowTransition(
                 target_state=parsed_state,
                 checkpoint=checkpoint,
@@ -432,10 +473,253 @@ class CareerWorkflowTransitionTool(_CareerTool):
         except (
             CareerWorkflowConflictError,
             CareerWorkflowNotFoundError,
+            OSError,
             ValidationError,
             ValueError,
+            json.JSONDecodeError,
+            sqlite3.Error,
         ) as exc:
-            return ToolResult.error(f"Career workflow transition failed: {exc}")
+            return self._fail("Career workflow transition failed", exc)
+        return workflow.model_dump_json()
+
+
+def _plan_verification_errors(checkpoint: CareerCheckpoint) -> list[str]:
+    """Return deterministic plan defects without asking an LLM to judge itself."""
+
+    known = {gap.competency for gap in checkpoint.gaps}
+    required = {
+        gap.competency for gap in checkpoint.gaps if gap.status is not GapStatus.DEMONSTRATED
+    }
+    covered: set[str] = set()
+    errors: list[str] = []
+    normalized_titles: set[str] = set()
+    for item in checkpoint.plan:
+        title = " ".join(item.title.casefold().split())
+        if title in normalized_titles:
+            errors.append(f"duplicate plan title: {item.title}")
+        normalized_titles.add(title)
+        if not item.addresses:
+            errors.append(f"plan item {item.item_id!r} does not identify an addressed gap")
+            continue
+        unknown = sorted(set(item.addresses) - known)
+        if unknown:
+            errors.append(
+                f"plan item {item.item_id!r} references unknown competencies: "
+                + ", ".join(unknown)
+            )
+        covered.update(set(item.addresses) & known)
+    missing = sorted(required - covered)
+    if missing:
+        errors.append("uncovered required competencies: " + ", ".join(missing))
+    return errors
+
+
+@tool_parameters(
+    tool_parameters_schema(
+        workflow_id=StringSchema("Workflow whose candidate plan must be verified."),
+        expected_version=IntegerSchema(description="Latest workflow version.", minimum=1),
+        idempotency_key=StringSchema(
+            "Stable key for safely replaying verification.", min_length=1, max_length=200
+        ),
+        required=["workflow_id", "expected_version", "idempotency_key"],
+    )
+)
+class CareerWorkflowVerifyPlanTool(_CareerTool):
+    """Gate user confirmation on deterministic gap coverage and plan integrity."""
+
+    @property
+    def name(self) -> str:
+        return "career_workflow_verify_plan"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Verify the candidate plan against accepted gap evidence. A valid plan advances "
+            "to user confirmation; an invalid plan enters bounded replanning and returns exact "
+            "defects. After two revisions, another failure terminates with REPLAN_EXHAUSTED."
+        )
+
+    async def execute(
+        self, workflow_id: str, expected_version: int, idempotency_key: str
+    ) -> str:
+        try:
+            current = self._store.get(workflow_id)
+            if current.state not in {
+                CareerWorkflowState.PLAN_VERIFYING,
+                CareerWorkflowState.REPLANNING,
+                CareerWorkflowState.AWAITING_CONFIRMATION,
+                CareerWorkflowState.FAILED,
+            }:
+                raise CareerWorkflowConflictError("workflow has no candidate plan to verify")
+            errors = _plan_verification_errors(current.checkpoint)
+            if errors and current.checkpoint.replan_count >= 2:
+                target = CareerWorkflowState.FAILED
+                checkpoint = current.checkpoint.model_copy(
+                    update={
+                        "verification_errors": errors,
+                        "error": "REPLAN_EXHAUSTED: " + "; ".join(errors),
+                        "resume_state": CareerWorkflowState.PLAN_VERIFYING,
+                    }
+                )
+            elif errors:
+                target = CareerWorkflowState.REPLANNING
+                checkpoint = current.checkpoint.model_copy(
+                    update={"verification_errors": errors}
+                )
+            else:
+                target = CareerWorkflowState.AWAITING_CONFIRMATION
+                checkpoint = current.checkpoint.model_copy(
+                    update={"verification_errors": [], "error": None, "resume_state": None}
+                )
+            workflow = self._store.transition(
+                workflow_id,
+                CareerWorkflowTransition(target_state=target, checkpoint=checkpoint),
+                expected_version=expected_version,
+                idempotency_key=idempotency_key,
+            )
+        except (
+            CareerWorkflowConflictError,
+            CareerWorkflowNotFoundError,
+            OSError,
+            ValueError,
+            sqlite3.Error,
+        ) as exc:
+            return self._fail("Career plan verification failed", exc)
+        return workflow.model_dump_json()
+
+
+@tool_parameters(
+    tool_parameters_schema(
+        workflow_id=StringSchema("Workflow whose rejected candidate plan should be revised."),
+        plan_json=StringSchema(
+            "Complete JSON array of revised LearningPlanItem objects.",
+            min_length=2,
+            max_length=50_000,
+        ),
+        trigger=StringSchema(
+            "Short verifier rule that triggered replanning.", min_length=1, max_length=200
+        ),
+        reason=StringSchema(
+            "Evidence-bound reason for the proposed changes.", min_length=1, max_length=2_000
+        ),
+        expected_version=IntegerSchema(description="Latest workflow version.", minimum=1),
+        idempotency_key=StringSchema(
+            "Stable key for safely replaying this revision.", min_length=1, max_length=200
+        ),
+        required=[
+            "workflow_id",
+            "plan_json",
+            "trigger",
+            "reason",
+            "expected_version",
+            "idempotency_key",
+        ],
+    )
+)
+class CareerWorkflowReplanTool(_CareerTool):
+    """Replace only a rejected, unconfirmed plan and retain an auditable diff."""
+
+    _plan_adapter = TypeAdapter(list[LearningPlanItem])
+
+    @property
+    def name(self) -> str:
+        return "career_workflow_replan"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Revise only a verifier-rejected plan before task creation. Evidence and gaps are "
+            "immutable, no more than two revisions are allowed, and the server records the old "
+            "plan, new plan, trigger, reason, and computed item diff before re-verification."
+        )
+
+    async def execute(
+        self,
+        workflow_id: str,
+        plan_json: str,
+        trigger: str,
+        reason: str,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> str:
+        try:
+            parsed: object = json.loads(plan_json)
+            revised_plan = self._plan_adapter.validate_python(parsed)
+            if not revised_plan:
+                raise ValueError("revised plan must contain at least one item")
+            if len(revised_plan) > 100:
+                raise ValueError("revised plan must contain at most 100 items")
+            current = self._store.get(workflow_id)
+            if (
+                current.state is CareerWorkflowState.PLAN_VERIFYING
+                and current.checkpoint.replan_history
+                and current.checkpoint.replan_history[-1].new_plan == revised_plan
+            ):
+                replay = current.checkpoint.replan_history[-1]
+                if replay.trigger != trigger or replay.reason != reason:
+                    raise CareerWorkflowConflictError(
+                        "replayed revision does not match its original trigger and reason"
+                    )
+                checkpoint = current.checkpoint
+            else:
+                if current.state is not CareerWorkflowState.REPLANNING:
+                    raise CareerWorkflowConflictError("workflow is not awaiting replanning")
+                if current.checkpoint.replan_count >= 2:
+                    raise CareerWorkflowConflictError("REPLAN_EXHAUSTED")
+                old_by_id = {item.item_id: item for item in current.checkpoint.plan}
+                new_by_id = {item.item_id: item for item in revised_plan}
+                if len(new_by_id) != len(revised_plan):
+                    raise ValueError("revised plan item IDs must be unique")
+                added = sorted(set(new_by_id) - set(old_by_id))
+                removed = sorted(set(old_by_id) - set(new_by_id))
+                modified = sorted(
+                    item_id
+                    for item_id in set(old_by_id) & set(new_by_id)
+                    if old_by_id[item_id] != new_by_id[item_id]
+                )
+                if not (added or removed or modified):
+                    raise ValueError("revised plan does not change the rejected plan")
+                next_revision = current.checkpoint.plan_revision + 1
+                record = ReplanRecord(
+                    from_revision=current.checkpoint.plan_revision,
+                    to_revision=next_revision,
+                    trigger=trigger,
+                    reason=reason,
+                    added_item_ids=added,
+                    removed_item_ids=removed,
+                    modified_item_ids=modified,
+                    old_plan=current.checkpoint.plan,
+                    new_plan=revised_plan,
+                )
+                checkpoint = CareerCheckpoint.model_validate(
+                    {
+                        **current.checkpoint.model_dump(mode="python"),
+                        "plan": revised_plan,
+                        "plan_revision": next_revision,
+                        "replan_count": current.checkpoint.replan_count + 1,
+                        "replan_history": [*current.checkpoint.replan_history, record],
+                        "verification_errors": [],
+                    }
+                )
+            workflow = self._store.transition(
+                workflow_id,
+                CareerWorkflowTransition(
+                    target_state=CareerWorkflowState.PLAN_VERIFYING,
+                    checkpoint=checkpoint,
+                ),
+                expected_version=expected_version,
+                idempotency_key=idempotency_key,
+            )
+        except (
+            CareerWorkflowConflictError,
+            CareerWorkflowNotFoundError,
+            OSError,
+            ValidationError,
+            ValueError,
+            json.JSONDecodeError,
+            sqlite3.Error,
+        ) as exc:
+            return self._fail("Career replanning failed", exc)
         return workflow.model_dump_json()
 
 
@@ -514,10 +798,12 @@ class CareerWorkflowRecordTasksTool(_CareerTool):
         except (
             CareerWorkflowConflictError,
             CareerWorkflowNotFoundError,
+            OSError,
             TaskNotFoundError,
             ValueError,
+            sqlite3.Error,
         ) as exc:
-            return ToolResult.error(f"Career task verification failed: {exc}")
+            return self._fail("Career task verification failed", exc)
         return workflow.model_dump_json()
 
 
@@ -581,10 +867,12 @@ class CareerWorkflowTaskManifestTool(_CareerTool):
         except (
             CareerWorkflowConflictError,
             CareerWorkflowNotFoundError,
+            OSError,
             TaskConflictError,
             ValueError,
+            sqlite3.Error,
         ) as exc:
-            return ToolResult.error(f"Career task manifest failed: {exc}")
+            return self._fail("Career task manifest failed", exc)
         return json.dumps(
             {
                 "workflow_id": workflow_id,
@@ -742,8 +1030,9 @@ class CareerWorkflowScheduleTool(_CareerCronTool):
             OSError,
             RuntimeError,
             ValueError,
+            sqlite3.Error,
         ) as exc:
-            return ToolResult.error(f"Career follow-up scheduling failed: {exc}")
+            return self._fail("Career follow-up scheduling failed", exc)
         return workflow.model_dump_json()
 
 
@@ -826,8 +1115,9 @@ class CareerWorkflowCompleteTool(_CareerCronTool):
             RuntimeError,
             TaskNotFoundError,
             ValueError,
+            sqlite3.Error,
         ) as exc:
-            return ToolResult.error(f"Career workflow completion failed: {exc}")
+            return self._fail("Career workflow completion failed", exc)
         return workflow.model_dump_json()
 
 
@@ -884,13 +1174,26 @@ class CareerWorkflowConfirmTool(_CareerTool):
         )
         if not original_text or not self._is_explicit_confirmation(original_text):
             return ToolResult.error(
-                "Career workflow confirmation failed: explicit confirmation was not present "
-                "in the original user message"
+                format_error(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    "Career workflow confirmation failed: explicit confirmation was not present "
+                    "in the original user message",
+                )
             )
         try:
             current = self._store.get(workflow_id)
+            if current.state not in {
+                CareerWorkflowState.AWAITING_CONFIRMATION,
+                CareerWorkflowState.TASKS_CREATING,
+            }:
+                raise CareerWorkflowConflictError("workflow is not awaiting confirmation")
             checkpoint = current.checkpoint.model_copy(
-                update={"confirmed": True, "error": None, "resume_state": None}
+                update={
+                    "confirmed": True,
+                    "confirmed_plan_revision": current.checkpoint.plan_revision,
+                    "error": None,
+                    "resume_state": None,
+                }
             )
             workflow = self._store.transition(
                 workflow_id,
@@ -904,8 +1207,10 @@ class CareerWorkflowConfirmTool(_CareerTool):
         except (
             CareerWorkflowConflictError,
             CareerWorkflowNotFoundError,
+            OSError,
             ValidationError,
             ValueError,
+            sqlite3.Error,
         ) as exc:
-            return ToolResult.error(f"Career workflow confirmation failed: {exc}")
+            return self._fail("Career workflow confirmation failed", exc)
         return workflow.model_dump_json()

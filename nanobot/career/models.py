@@ -13,6 +13,8 @@ class CareerWorkflowState(StrEnum):
     DOCUMENTS_READY = "documents_ready"
     EVIDENCE_RETRIEVED = "evidence_retrieved"
     GAP_READY = "gap_ready"
+    PLAN_VERIFYING = "plan_verifying"
+    REPLANNING = "replanning"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     TASKS_CREATING = "tasks_creating"
     TASKS_CREATED = "tasks_created"
@@ -52,12 +54,32 @@ class LearningPlanItem(BaseModel):
     title: str = Field(min_length=1, max_length=240)
     description: str = Field(default="", max_length=5_000)
     priority: int = Field(default=3, ge=1, le=5)
+    addresses: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ReplanRecord(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    from_revision: int = Field(ge=1)
+    to_revision: int = Field(ge=2)
+    trigger: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=2_000)
+    added_item_ids: list[str] = Field(default_factory=list, max_length=100)
+    removed_item_ids: list[str] = Field(default_factory=list, max_length=100)
+    modified_item_ids: list[str] = Field(default_factory=list, max_length=100)
+    old_plan: list[LearningPlanItem] = Field(min_length=1, max_length=100)
+    new_plan: list[LearningPlanItem] = Field(min_length=1, max_length=100)
 
 
 class CareerCheckpoint(BaseModel):
     evidence: list[EvidenceReference] = Field(default_factory=list, max_length=200)
     gaps: list[GapItem] = Field(default_factory=list, max_length=100)
     plan: list[LearningPlanItem] = Field(default_factory=list, max_length=100)
+    plan_revision: int = Field(default=1, ge=1)
+    confirmed_plan_revision: int | None = Field(default=None, ge=1)
+    replan_count: int = Field(default=0, ge=0, le=2)
+    replan_history: list[ReplanRecord] = Field(default_factory=list, max_length=2)
+    verification_errors: list[str] = Field(default_factory=list, max_length=100)
     task_ids: dict[str, str] = Field(default_factory=dict)
     confirmed: bool = False
     followup_job_id: str | None = Field(default=None, max_length=200)
@@ -94,6 +116,23 @@ class CareerCheckpoint(BaseModel):
             raise ValueError("task IDs must belong to learning plan items")
         if any(not task_id.strip() for task_id in self.task_ids.values()):
             raise ValueError("task IDs must not be empty")
+        # Backfill checkpoints written before confirmations carried an explicit
+        # plan revision. New writes still bind the value in the dedicated tool.
+        if self.confirmed and self.confirmed_plan_revision is None:
+            self.confirmed_plan_revision = self.plan_revision
+        if self.confirmed_plan_revision is not None:
+            if not self.confirmed:
+                raise ValueError("a confirmed plan revision requires confirmation")
+            if self.confirmed_plan_revision != self.plan_revision:
+                raise ValueError("confirmation must match the current plan revision")
+        if self.replan_count != len(self.replan_history):
+            raise ValueError("replan count must match replan history")
+        expected_revision = 1 + self.replan_count
+        if self.plan_revision != expected_revision:
+            raise ValueError("plan revision must equal one plus the replan count")
+        for expected_from, record in enumerate(self.replan_history, 1):
+            if record.from_revision != expected_from or record.to_revision != expected_from + 1:
+                raise ValueError("replan history revisions must be contiguous")
         return self
 
 

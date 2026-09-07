@@ -12,11 +12,13 @@ from nanobot.agent.tools.career import (
     CareerWorkflowConfirmTool,
     CareerWorkflowGetTool,
     CareerWorkflowRecordTasksTool,
+    CareerWorkflowReplanTool,
     CareerWorkflowRetrieveTool,
     CareerWorkflowScheduleTool,
     CareerWorkflowStartTool,
     CareerWorkflowTaskManifestTool,
     CareerWorkflowTransitionTool,
+    CareerWorkflowVerifyPlanTool,
 )
 from nanobot.agent.tools.context import RequestContext, request_context
 from nanobot.agent.tools.knowledge import KnowledgeToolsConfig
@@ -62,6 +64,7 @@ async def evaluate_career_workflow(root: Path) -> dict[str, object]:
         workspace=root, config=config, knowledge_config=knowledge_config
     )
     transition = CareerWorkflowTransitionTool(workspace=root, config=config)
+    verifier = CareerWorkflowVerifyPlanTool(workspace=root, config=config)
     confirm = CareerWorkflowConfirmTool(workspace=root, config=config)
     manifest = CareerWorkflowTaskManifestTool(workspace=root, config=config)
     record = CareerWorkflowRecordTasksTool(workspace=root, config=config)
@@ -124,14 +127,61 @@ async def evaluate_career_workflow(root: Path) -> dict[str, object]:
             "priority": 1,
         }
     ]
-    planned = _json_result(
+    verifying = _json_result(
         await transition.execute(
             workflow_id,
-            "awaiting_confirmation",
+            "plan_verifying",
             json.dumps(checkpoint),
             int(gap["version"]),
             "eval-plan",
         )
+    )
+    assert verifying is not None
+    rejected = _json_result(
+        await verifier.execute(workflow_id, int(verifying["version"]), "eval-reject-plan")
+    )
+    cases.append(
+        CareerCaseResult(
+            "career-verifier-reject",
+            "career_guardrail",
+            rejected is not None and rejected["state"] == "replanning",
+            "uncovered gap rejected before confirmation",
+        )
+    )
+    assert rejected is not None
+    revised_plan = [
+        {
+            "item_id": "rag-eval",
+            "title": "Build a reproducible RAG evaluation set",
+            "description": "Measure Recall@K, MRR, and NDCG.",
+            "priority": 1,
+            "addresses": ["RAG evaluation"],
+        }
+    ]
+    replan = CareerWorkflowReplanTool(workspace=root, config=config)
+    revised = _json_result(
+        await replan.execute(
+            workflow_id,
+            json.dumps(revised_plan),
+            "uncovered-required-competency",
+            "Bind the RAG evaluation task to the accepted missing competency.",
+            int(rejected["version"]),
+            "eval-replan",
+        )
+    )
+    cases.append(
+        CareerCaseResult(
+            "career-bounded-replan",
+            "career_recovery",
+            revised is not None
+            and revised["checkpoint"]["plan_revision"] == 2
+            and len(revised["checkpoint"]["replan_history"]) == 1,
+            "revision and diff persisted",
+        )
+    )
+    assert revised is not None
+    planned = _json_result(
+        await verifier.execute(workflow_id, int(revised["version"]), "eval-verify-plan")
     )
     cases.append(
         CareerCaseResult("career-plan", "career_success", planned is not None, "awaiting confirmation")

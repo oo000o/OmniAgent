@@ -5,7 +5,7 @@ def test_offline_evaluation_has_at_least_fifty_passing_cases(tmp_path) -> None:
     output = tmp_path / "report.json"
     report = run(output)
 
-    assert report["total"] == 75
+    assert report["total"] == 92
     assert report["passed"] == report["total"]
     benchmark = report["retrieval_benchmark"]
     assert isinstance(benchmark, dict)
@@ -19,4 +19,12 @@ def test_offline_evaluation_has_at_least_fifty_passing_cases(tmp_path) -> None:
         "career_recovery",
         "career_success",
     }
+    observability = report["observability"]
+    assert isinstance(observability, dict)
+    assert observability["passed"] == observability["total"]
+    assert "observability" in report["groups"]
+    fault = report["fault_injection"]
+    assert isinstance(fault, dict)
+    assert fault["passed"] == fault["total"]
+    assert "fault_injection" in report["groups"]
     assert output.is_file()

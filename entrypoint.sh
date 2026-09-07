@@ -1,6 +1,17 @@
 #!/bin/sh
 dir="$HOME/.nanobot"
 
+copy_config_atomically() {
+    source_path="$1"
+    target_path="$2"
+    temporary_path="${target_path}.tmp.$$"
+    if cp "$source_path" "$temporary_path" && mv -f "$temporary_path" "$target_path"; then
+        return 0
+    fi
+    rm -f "$temporary_path"
+    return 1
+}
+
 # Render deploy path (see render.yaml + render-config.json). Gated on Render's
 # automatic RENDER=true env var so local Docker/podman usage is unaffected.
 # Initializes the on-disk config from the committed template (wiring secrets via
@@ -16,7 +27,8 @@ if [ "$RENDER" = "true" ]; then
     # across deploys; overwriting it every boot would discard those changes.
     if [ ! -f "$config" ]; then
         echo "[entrypoint] initializing $config from render-config.json"
-        cp /app/render-config.json "$config" || echo "[entrypoint] warning: cp config failed"
+        copy_config_atomically /app/render-config.json "$config" \
+            || echo "[entrypoint] warning: copy config failed"
     else
         echo "[entrypoint] existing $config found — leaving it in place"
     fi
@@ -33,11 +45,19 @@ if [ -n "$NANOBOT_CONFIG_TEMPLATE" ]; then
     fi
     mkdir -p "$dir"
     if [ "$NANOBOT_CONFIG_TEMPLATE_MODE" = "overwrite" ]; then
-        cp "$NANOBOT_CONFIG_TEMPLATE" "$config"
-        echo "[entrypoint] refreshed $config from $NANOBOT_CONFIG_TEMPLATE"
+        if copy_config_atomically "$NANOBOT_CONFIG_TEMPLATE" "$config"; then
+            echo "[entrypoint] refreshed $config from $NANOBOT_CONFIG_TEMPLATE"
+        else
+            echo "[entrypoint] error: failed to refresh $config from $NANOBOT_CONFIG_TEMPLATE" >&2
+            exit 1
+        fi
     elif [ ! -f "$config" ]; then
-        cp "$NANOBOT_CONFIG_TEMPLATE" "$config"
-        echo "[entrypoint] initialized $config from $NANOBOT_CONFIG_TEMPLATE"
+        if copy_config_atomically "$NANOBOT_CONFIG_TEMPLATE" "$config"; then
+            echo "[entrypoint] initialized $config from $NANOBOT_CONFIG_TEMPLATE"
+        else
+            echo "[entrypoint] error: failed to initialize $config from $NANOBOT_CONFIG_TEMPLATE" >&2
+            exit 1
+        fi
     fi
     set -- "$@" --config "$config"
 fi

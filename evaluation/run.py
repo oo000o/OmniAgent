@@ -13,6 +13,8 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from evaluation.career_workflow import evaluate_career_workflow
+from evaluation.fault_injection import evaluate_fault_injection
+from evaluation.observability import evaluate_observability
 from evaluation.retrieval import evaluate_retrieval
 from nanobot.knowledge.citations import render_retrieval_context
 from nanobot.knowledge.fusion import reciprocal_rank_fusion
@@ -172,7 +174,7 @@ def run(output: Path) -> dict[str, object]:
     ) as directory:
         root = Path(directory)
         cases = [*_retrieval_and_citation_cases(root), *_task_cases(root), *_fusion_cases()]
-        retrieval_benchmark, career_workflow = asyncio.run(
+        retrieval_benchmark, career_workflow, observability, fault_injection = asyncio.run(
             _run_async_evaluations(root)
         )
     passed = sum(case.passed for case in cases)
@@ -189,15 +191,33 @@ def run(output: Path) -> dict[str, object]:
     if not isinstance(career_groups, dict):
         raise RuntimeError("career workflow groups are malformed")
     groups.update(career_groups)
+    observability_groups = observability.get("groups")
+    if not isinstance(observability_groups, dict):
+        raise RuntimeError("observability groups are malformed")
+    groups.update(observability_groups)
+    fault_groups = fault_injection.get("groups")
+    if not isinstance(fault_groups, dict):
+        raise RuntimeError("fault injection groups are malformed")
+    groups.update(fault_groups)
     career_total = int(career_workflow["total"])
     career_passed = int(career_workflow["passed"])
-    total = len(cases) + career_total
-    passed += career_passed
+    observability_total = int(observability["total"])
+    observability_passed = int(observability["passed"])
+    fault_total = int(fault_injection["total"])
+    fault_passed = int(fault_injection["passed"])
+    total = len(cases) + career_total + observability_total + fault_total
+    passed += career_passed + observability_passed + fault_passed
     career_cases = career_workflow.get("cases")
     if not isinstance(career_cases, list):
         raise RuntimeError("career workflow cases are malformed")
+    observability_cases = observability.get("cases")
+    if not isinstance(observability_cases, list):
+        raise RuntimeError("observability cases are malformed")
+    fault_cases = fault_injection.get("cases")
+    if not isinstance(fault_cases, list):
+        raise RuntimeError("fault injection cases are malformed")
     report: dict[str, object] = {
-        "suite": "omniagent-offline-baseline-v3",
+        "suite": "omniagent-offline-baseline-v5",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "total": total,
         "passed": passed,
@@ -205,17 +225,26 @@ def run(output: Path) -> dict[str, object]:
         "groups": groups,
         "retrieval_benchmark": retrieval_benchmark,
         "career_workflow": career_workflow,
-        "cases": [asdict(case) for case in cases] + career_cases,
+        "observability": observability,
+        "fault_injection": fault_injection,
+        "cases": [asdict(case) for case in cases]
+        + career_cases
+        + observability_cases
+        + fault_cases,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
 
 
-async def _run_async_evaluations(root: Path) -> tuple[dict[str, object], dict[str, object]]:
+async def _run_async_evaluations(
+    root: Path,
+) -> tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]:
     return (
         await evaluate_retrieval(root / "retrieval-benchmark"),
         await evaluate_career_workflow(root / "career-workflow"),
+        await evaluate_observability(root / "observability"),
+        await evaluate_fault_injection(root / "fault-injection"),
     )
 
 
@@ -240,6 +269,8 @@ def main() -> None:
                     for key in ("fixture", "case_count", "k", "metrics")
                 },
                 "career_workflow": report["career_workflow"],
+                "observability": report["observability"],
+                "fault_injection": report["fault_injection"],
             },
             indent=2,
         )

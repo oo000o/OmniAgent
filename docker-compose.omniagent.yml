@@ -15,7 +15,10 @@ services:
     environment:
       NANOBOT_CONFIG_TEMPLATE: /app/config/omniagent.json
       NANOBOT_CONFIG_TEMPLATE_MODE: overwrite
-    ports:
+    # Replace, rather than append to, the base service ports. Appending would bind
+    # 8765 twice (0.0.0.0 and 127.0.0.1) and can leave Docker Desktop's restarted
+    # container running without a network endpoint.
+    ports: !override
       - "127.0.0.1:8765:8765"
       - "127.0.0.1:18790:18790"
     volumes:

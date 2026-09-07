@@ -789,6 +789,86 @@ async def test_on_message_audio_publishes_downloaded_path_and_transcription() ->
 
 
 @pytest.mark.asyncio
+async def test_slow_file_download_cannot_be_overtaken_by_following_text() -> None:
+    channel = _make_feishu_channel()
+    channel._processed_message_ids.clear()
+    captured = []
+    download_started = asyncio.Event()
+    allow_download_to_finish = asyncio.Event()
+
+    async def capture(msg):
+        captured.append(msg)
+
+    async def slow_download(*_args):
+        download_started.set()
+        await allow_download_to_finish.wait()
+        path = r"C:\\Users\\alice\\.nanobot\\media\\feishu\\resume.pdf"
+        return path, f"[file: {path}]"
+
+    channel.bus.publish_inbound = capture
+    channel._download_and_save_media = slow_download
+    channel._add_reaction = AsyncMock(return_value=None)
+
+    file_event = _make_feishu_event(
+        msg_type="file",
+        content='{"file_key": "resume_key", "file_name": "resume.pdf"}',
+        message_id="om_file",
+    )
+    text_event = _make_feishu_event(
+        msg_type="text",
+        content='{"text": "read the PDF I just uploaded"}',
+        message_id="om_text",
+    )
+
+    file_task = asyncio.create_task(channel._on_message(file_event))
+    await download_started.wait()
+    text_task = asyncio.create_task(channel._on_message(text_event))
+    await asyncio.sleep(0)
+
+    assert captured == []
+    allow_download_to_finish.set()
+    await asyncio.gather(file_task, text_task)
+
+    assert len(captured) == 1
+    assert captured[0].metadata["msg_type"] == "text"
+    assert captured[0].metadata["attachment_message_ids"] == ["om_file"]
+    assert captured[0].media == [
+        r"C:\\Users\\alice\\.nanobot\\media\\feishu\\resume.pdf"
+    ]
+    assert captured[0].content.endswith("read the PDF I just uploaded")
+
+
+@pytest.mark.asyncio
+async def test_bare_file_is_published_after_followup_window() -> None:
+    channel = _make_feishu_channel()
+    channel._processed_message_ids.clear()
+    channel._FILE_FOLLOWUP_WINDOW = 0
+    captured = []
+
+    async def capture(msg):
+        captured.append(msg)
+
+    path = r"C:\\Users\\alice\\.nanobot\\media\\feishu\\resume.pdf"
+    channel.bus.publish_inbound = capture
+    channel._download_and_save_media = AsyncMock(return_value=(path, f"[file: {path}]"))
+    channel._add_reaction = AsyncMock(return_value=None)
+
+    await channel._on_message(
+        _make_feishu_event(
+            msg_type="file",
+            content='{"file_key": "resume_key", "file_name": "resume.pdf"}',
+            message_id="om_file",
+        )
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert len(captured) == 1
+    assert captured[0].metadata["msg_type"] == "file"
+    assert captured[0].media == [path]
+
+
+@pytest.mark.asyncio
 async def test_download_and_save_media_returns_absolute_path_in_content(monkeypatch, tmp_path) -> None:
     channel = _make_feishu_channel()
     monkeypatch.setattr(feishu, "get_media_dir", lambda _channel: tmp_path)

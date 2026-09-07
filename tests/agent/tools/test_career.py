@@ -6,16 +6,19 @@ from nanobot.agent.tools.career import (
     CareerWorkflowConfirmTool,
     CareerWorkflowGetTool,
     CareerWorkflowRecordTasksTool,
+    CareerWorkflowReplanTool,
     CareerWorkflowRetrieveTool,
     CareerWorkflowScheduleTool,
     CareerWorkflowStartTool,
     CareerWorkflowTaskManifestTool,
     CareerWorkflowTransitionTool,
+    CareerWorkflowVerifyPlanTool,
 )
 from nanobot.agent.tools.context import RequestContext, request_context
 from nanobot.agent.tools.knowledge import KnowledgeToolsConfig
 from nanobot.career import (
     CareerCheckpoint,
+    CareerWorkflow,
     CareerWorkflowCreate,
     CareerWorkflowState,
     CareerWorkflowStore,
@@ -26,6 +29,7 @@ from nanobot.career import (
     LearningPlanItem,
 )
 from nanobot.cron.service import CronService
+from nanobot.knowledge.embeddings import EmbeddingProviderError
 from nanobot.session.keys import UNIFIED_SESSION_KEY
 from nanobot.tasking import TaskCreate, TaskStatus, TaskStore, TaskUpdate
 
@@ -52,7 +56,8 @@ async def test_career_start_rejects_documents_outside_workspace(tmp_path) -> Non
 
     result = await start.execute("../resume.md", "jd.md", "career-demo")
 
-    assert result.startswith("Career workflow creation failed:")
+    assert result.startswith("VALIDATION_ERROR:")
+    assert "Career workflow creation failed:" in result
 
 
 async def test_transition_tool_rejects_skipping_confirmation(tmp_path) -> None:
@@ -73,7 +78,8 @@ async def test_transition_tool_rejects_skipping_confirmation(tmp_path) -> None:
         "unsafe-skip",
     )
 
-    assert result.startswith("Career workflow transition failed:")
+    assert result.startswith("VALIDATION_ERROR:")
+    assert "Career workflow transition failed:" in result
     assert "invalid workflow transition" in result
 
 
@@ -107,6 +113,7 @@ async def test_retrieval_persists_only_real_resume_and_jd_chunks(tmp_path) -> No
     )
 
     assert result["workflow"]["state"] == CareerWorkflowState.EVIDENCE_RETRIEVED
+    assert result["retrieval_fallback"] is False
     assert {item["source_type"] for item in result["evidence"]} == {"resume", "jd"}
     assert all(item["chunk_id"] for item in result["evidence"])
     persisted = result["workflow"]["checkpoint"]["evidence"]
@@ -123,6 +130,50 @@ async def test_retrieval_persists_only_real_resume_and_jd_chunks(tmp_path) -> No
         )
     )
     assert replay["workflow"]["version"] == result["workflow"]["version"]
+
+
+class _FailingEmbeddingProvider:
+    @property
+    def model_name(self) -> str:
+        return "failing-v1"
+
+    async def embed(self, texts):
+        raise EmbeddingProviderError("backend unavailable")
+
+
+async def test_retrieve_records_lexical_fallback_without_raising(tmp_path) -> None:
+    (tmp_path / "resume.md").write_text(
+        "Built Python APIs and Docker deployment automation.", encoding="utf-8"
+    )
+    (tmp_path / "jd.md").write_text(
+        "The role requires Python, RAG evaluation, and Docker.", encoding="utf-8"
+    )
+    career_config = CareerToolsConfig(database_path="state/career.db")
+    start = CareerWorkflowStartTool(workspace=tmp_path, config=career_config)
+    workflow = json.loads(await start.execute("resume.md", "jd.md", "career-fallback"))
+    retrieve = CareerWorkflowRetrieveTool(
+        workspace=tmp_path,
+        config=career_config,
+        knowledge_config=KnowledgeToolsConfig(
+            database_path="state/knowledge.db",
+            retrieval_mode="hybrid",
+            embedding_model="failing-v1",
+            candidate_results=10,
+        ),
+        embedding_provider=_FailingEmbeddingProvider(),
+    )
+
+    result = json.loads(
+        await retrieve.execute(
+            workflow["workflow_id"],
+            json.dumps(["Python", "RAG evaluation"]),
+            workflow["version"],
+            "retrieve-fallback",
+        )
+    )
+
+    assert result["retrieval_fallback"] is True
+    assert result["workflow"]["state"] == CareerWorkflowState.EVIDENCE_RETRIEVED
 
 
 async def test_retrieved_evidence_drives_gap_and_plan_checkpoints(tmp_path) -> None:
@@ -183,26 +234,210 @@ async def test_retrieved_evidence_drives_gap_and_plan_checkpoints(tmp_path) -> N
     plan_checkpoint = {
         **gap_ready["checkpoint"],
         "plan": [
-            {
-                "item_id": "rag-eval",
-                "title": "Build a reproducible RAG evaluation set",
-                "priority": 1,
-            }
-        ],
-    }
-    awaiting = json.loads(
+                {
+                    "item_id": "rag-eval",
+                    "title": "Build a reproducible RAG evaluation set",
+                    "priority": 1,
+                    "addresses": ["RAG evaluation"],
+                }
+            ],
+        }
+    verifying = json.loads(
         await transition.execute(
             gap_ready["workflow_id"],
-            CareerWorkflowState.AWAITING_CONFIRMATION.value,
+            CareerWorkflowState.PLAN_VERIFYING.value,
             json.dumps(plan_checkpoint),
             gap_ready["version"],
             "plan-flow",
+        )
+    )
+    verifier = CareerWorkflowVerifyPlanTool(workspace=tmp_path, config=config)
+    awaiting = json.loads(
+        await verifier.execute(
+            verifying["workflow_id"], verifying["version"], "verify-plan-flow"
         )
     )
 
     assert awaiting["state"] == CareerWorkflowState.AWAITING_CONFIRMATION
     assert awaiting["checkpoint"]["evidence"] == evidence
     assert awaiting["checkpoint"]["gaps"] == gap_checkpoint["gaps"]
+
+
+async def test_bounded_replan_records_diff_and_binds_confirmation_revision(tmp_path) -> None:
+    config = CareerToolsConfig(database_path="state/career.db")
+    store = CareerWorkflowStore(tmp_path / config.database_path)
+    store.initialize()
+    current = store.create(
+        CareerWorkflowCreate(resume_source="resume.md", jd_source="jd.md"),
+        idempotency_key="bounded-workflow",
+    )
+    checkpoint = CareerCheckpoint(
+        evidence=[
+            EvidenceReference(
+                evidence_id="K1", source_type="jd", source_name="jd.md", chunk_id="c1"
+            )
+        ],
+        gaps=[
+            GapItem(
+                competency="RAG evaluation",
+                status=GapStatus.MISSING,
+                rationale="Required by the JD.",
+                evidence_ids=["K1"],
+            )
+        ],
+        plan=[LearningPlanItem(item_id="generic", title="Read documentation")],
+    )
+    for state, key in (
+        (CareerWorkflowState.EVIDENCE_RETRIEVED, "bounded-evidence"),
+        (CareerWorkflowState.GAP_READY, "bounded-gap"),
+        (CareerWorkflowState.PLAN_VERIFYING, "bounded-plan"),
+    ):
+        current = store.transition(
+            current.workflow_id,
+            CareerWorkflowTransition(target_state=state, checkpoint=checkpoint),
+            expected_version=current.version,
+            idempotency_key=key,
+        )
+
+    verifier = CareerWorkflowVerifyPlanTool(workspace=tmp_path, config=config)
+    rejected = json.loads(
+        await verifier.execute(current.workflow_id, current.version, "bounded-reject")
+    )
+    assert rejected["state"] == CareerWorkflowState.REPLANNING
+    assert any(
+        "uncovered required competencies" in error
+        for error in rejected["checkpoint"]["verification_errors"]
+    )
+
+    revised_plan = [
+        {
+            "item_id": "rag-eval",
+            "title": "Build a RAG evaluation set",
+            "description": "Measure Recall@K and MRR.",
+            "priority": 1,
+            "addresses": ["RAG evaluation"],
+        }
+    ]
+    replan = CareerWorkflowReplanTool(workspace=tmp_path, config=config)
+    revised = json.loads(
+        await replan.execute(
+            current.workflow_id,
+            json.dumps(revised_plan),
+            "uncovered-required-competency",
+            "Replace an ungrounded task with an evidence-bound evaluation task.",
+            rejected["version"],
+            "bounded-replan-1",
+        )
+    )
+    replay = json.loads(
+        await replan.execute(
+            current.workflow_id,
+            json.dumps(revised_plan),
+            "uncovered-required-competency",
+            "Replace an ungrounded task with an evidence-bound evaluation task.",
+            rejected["version"],
+            "bounded-replan-1",
+        )
+    )
+    assert replay == revised
+    assert revised["checkpoint"]["plan_revision"] == 2
+    assert revised["checkpoint"]["replan_count"] == 1
+    diff = revised["checkpoint"]["replan_history"][0]
+    assert diff["added_item_ids"] == ["rag-eval"]
+    assert diff["removed_item_ids"] == ["generic"]
+    assert diff["old_plan"][0]["title"] == "Read documentation"
+    assert diff["new_plan"][0]["title"] == "Build a RAG evaluation set"
+
+    accepted = json.loads(
+        await verifier.execute(
+            current.workflow_id, revised["version"], "bounded-accept-revision-2"
+        )
+    )
+    assert accepted["state"] == CareerWorkflowState.AWAITING_CONFIRMATION
+    confirm = CareerWorkflowConfirmTool(workspace=tmp_path, config=config)
+    confirm.set_context(
+        RequestContext(
+            channel="feishu",
+            chat_id="chat-1",
+            original_user_text="确认创建学习任务",
+        )
+    )
+    stale = await confirm.execute(
+        current.workflow_id, revised["version"], "bounded-stale-confirmation"
+    )
+    assert "reload" in stale
+    creating = json.loads(
+        await confirm.execute(
+            current.workflow_id, accepted["version"], "bounded-confirm-revision-2"
+        )
+    )
+    assert creating["checkpoint"]["confirmed_plan_revision"] == 2
+
+
+async def test_replanning_stops_after_two_rejected_revisions(tmp_path) -> None:
+    config = CareerToolsConfig(database_path="state/career.db")
+    store = CareerWorkflowStore(tmp_path / config.database_path)
+    store.initialize()
+    current = store.create(
+        CareerWorkflowCreate(resume_source="resume.md", jd_source="jd.md"),
+        idempotency_key="exhausted-workflow",
+    )
+    checkpoint = CareerCheckpoint(
+        evidence=[
+            EvidenceReference(
+                evidence_id="K1", source_type="jd", source_name="jd.md", chunk_id="c1"
+            )
+        ],
+        gaps=[
+            GapItem(
+                competency="MCP reliability",
+                status=GapStatus.MISSING,
+                rationale="Required by the JD.",
+                evidence_ids=["K1"],
+            )
+        ],
+        plan=[LearningPlanItem(item_id="attempt", title="Attempt zero")],
+    )
+    for state, key in (
+        (CareerWorkflowState.EVIDENCE_RETRIEVED, "exhausted-evidence"),
+        (CareerWorkflowState.GAP_READY, "exhausted-gap"),
+        (CareerWorkflowState.PLAN_VERIFYING, "exhausted-plan"),
+    ):
+        current = store.transition(
+            current.workflow_id,
+            CareerWorkflowTransition(target_state=state, checkpoint=checkpoint),
+            expected_version=current.version,
+            idempotency_key=key,
+        )
+    verifier = CareerWorkflowVerifyPlanTool(workspace=tmp_path, config=config)
+    replan = CareerWorkflowReplanTool(workspace=tmp_path, config=config)
+    for attempt in (1, 2):
+        rejected = json.loads(
+            await verifier.execute(
+                current.workflow_id, current.version, f"exhausted-reject-{attempt}"
+            )
+        )
+        assert rejected["state"] == CareerWorkflowState.REPLANNING
+        current = CareerWorkflow.model_validate(
+            json.loads(
+                await replan.execute(
+                    current.workflow_id,
+                    json.dumps(
+                        [{"item_id": "attempt", "title": f"Attempt {attempt}"}]
+                    ),
+                    "missing-gap-binding",
+                    f"Try revision {attempt} without changing accepted evidence.",
+                    rejected["version"],
+                    f"exhausted-replan-{attempt}",
+                )
+            )
+        )
+    exhausted = json.loads(
+        await verifier.execute(current.workflow_id, current.version, "exhausted-final")
+    )
+    assert exhausted["state"] == CareerWorkflowState.FAILED
+    assert exhausted["checkpoint"]["replan_count"] == 2
+    assert exhausted["checkpoint"]["error"].startswith("REPLAN_EXHAUSTED:")
 
 
 async def test_transition_reuses_authoritative_immutable_evidence(tmp_path) -> None:
@@ -248,6 +483,17 @@ async def test_transition_reuses_authoritative_immutable_evidence(tmp_path) -> N
                 )
             ],
         }
+    ).model_dump(mode="json")
+    supplied.update(
+        {
+            "confirmed": True,
+            "confirmed_plan_revision": 99,
+            "plan_revision": 99,
+            "replan_count": 2,
+            "verification_errors": ["invented verifier result"],
+            "task_ids": {"invented": "task"},
+            "followup_job_id": "job",
+        }
     )
     transition = CareerWorkflowTransitionTool(
         workspace=tmp_path,
@@ -258,7 +504,7 @@ async def test_transition_reuses_authoritative_immutable_evidence(tmp_path) -> N
         await transition.execute(
             current.workflow_id,
             CareerWorkflowState.GAP_READY.value,
-            supplied.model_dump_json(),
+            json.dumps(supplied),
             current.version,
             "gap-canonical-evidence",
         )
@@ -266,6 +512,13 @@ async def test_transition_reuses_authoritative_immutable_evidence(tmp_path) -> N
 
     assert result["state"] == CareerWorkflowState.GAP_READY
     assert result["checkpoint"]["evidence"][0]["source_name"] == "jd.md"
+    assert result["checkpoint"]["confirmed"] is False
+    assert result["checkpoint"]["confirmed_plan_revision"] is None
+    assert result["checkpoint"]["plan_revision"] == 1
+    assert result["checkpoint"]["replan_count"] == 0
+    assert result["checkpoint"]["verification_errors"] == []
+    assert result["checkpoint"]["task_ids"] == {}
+    assert result["checkpoint"]["followup_job_id"] is None
 
 
 async def test_generic_transition_cannot_forge_confirmation(tmp_path) -> None:
@@ -329,11 +582,16 @@ async def test_explicit_user_confirmation_advances_displayed_plan(tmp_path) -> N
                 evidence_ids=["K1"],
             )
         ],
-        plan=[LearningPlanItem(item_id="rag", title="Learn RAG evaluation")],
+        plan=[
+            LearningPlanItem(
+                item_id="rag", title="Learn RAG evaluation", addresses=["RAG"]
+            )
+        ],
     )
     for state, key in (
         (CareerWorkflowState.EVIDENCE_RETRIEVED, "evidence"),
         (CareerWorkflowState.GAP_READY, "gap"),
+        (CareerWorkflowState.PLAN_VERIFYING, "plan-verifying"),
         (CareerWorkflowState.AWAITING_CONFIRMATION, "plan"),
     ):
         current = store.transition(
@@ -413,13 +671,24 @@ async def test_task_manifest_recovers_after_partial_mcp_creation(tmp_path) -> No
             )
         ],
         plan=[
-            LearningPlanItem(item_id="rag", title="Build RAG evaluation", priority=1),
-            LearningPlanItem(item_id="recovery", title="Test checkpoint recovery", priority=2),
+            LearningPlanItem(
+                item_id="rag",
+                title="Build RAG evaluation",
+                priority=1,
+                addresses=["Agent reliability"],
+            ),
+            LearningPlanItem(
+                item_id="recovery",
+                title="Test checkpoint recovery",
+                priority=2,
+                addresses=["Agent reliability"],
+            ),
         ],
     )
     for state, key in (
         (CareerWorkflowState.EVIDENCE_RETRIEVED, "partial-evidence"),
         (CareerWorkflowState.GAP_READY, "partial-gap"),
+        (CareerWorkflowState.PLAN_VERIFYING, "partial-plan-verifying"),
         (CareerWorkflowState.AWAITING_CONFIRMATION, "partial-plan"),
     ):
         current = store.transition(
@@ -551,11 +820,18 @@ async def test_followup_schedule_survives_restart_and_completes_from_real_state(
                 evidence_ids=["K1"],
             )
         ],
-        plan=[LearningPlanItem(item_id="rag", title="Build RAG evaluation")],
+        plan=[
+            LearningPlanItem(
+                item_id="rag",
+                title="Build RAG evaluation",
+                addresses=["RAG evaluation"],
+            )
+        ],
     )
     for state, key in (
         (CareerWorkflowState.EVIDENCE_RETRIEVED, "schedule-evidence"),
         (CareerWorkflowState.GAP_READY, "schedule-gap"),
+        (CareerWorkflowState.PLAN_VERIFYING, "schedule-plan-verifying"),
         (CareerWorkflowState.AWAITING_CONFIRMATION, "schedule-plan"),
     ):
         current = workflow_store.transition(
@@ -564,7 +840,9 @@ async def test_followup_schedule_survives_restart_and_completes_from_real_state(
             expected_version=current.version,
             idempotency_key=key,
         )
-    confirmed = checkpoint.model_copy(update={"confirmed": True})
+    confirmed = checkpoint.model_copy(
+        update={"confirmed": True, "confirmed_plan_revision": checkpoint.plan_revision}
+    )
     current = workflow_store.transition(
         current.workflow_id,
         CareerWorkflowTransition(
