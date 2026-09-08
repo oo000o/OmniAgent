@@ -89,6 +89,9 @@ pdf = [
 olostep = [
     "olostep>=0.1.0; python_version < '3.14'",
 ]
+rerank = [
+    "sentence-transformers>=3.0.0,<6.0.0",
+]
 dev = [
     "pytest>=9.0.0,<10.0.0",
     "pytest-asyncio>=1.3.0,<2.0.0",

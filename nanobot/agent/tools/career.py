@@ -13,7 +13,10 @@ from pydantic import Field, TypeAdapter, ValidationError, field_validator
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import RequestContext, ToolContext, current_request_context
-from nanobot.agent.tools.knowledge import KnowledgeToolsConfig
+from nanobot.agent.tools.knowledge import (
+    KnowledgeToolsConfig,
+    build_configured_query_rewriter,
+)
 from nanobot.agent.tools.path_utils import resolve_workspace_path
 from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
 from nanobot.career import (
@@ -208,7 +211,7 @@ class CareerWorkflowRetrieveTool(_CareerTool):
         self._knowledge_store = KnowledgeStore(database_path)
         self._knowledge_store.initialize()
         self._knowledge_config = knowledge_config
-        if knowledge_config.retrieval_mode == "hybrid":
+        if knowledge_config.retrieval_mode in {"vector", "hybrid"}:
             provider = embedding_provider or OpenAICompatibleEmbeddingProvider(
                 model=knowledge_config.embedding_model,
                 api_key=knowledge_config.embedding_api_key,
@@ -217,7 +220,12 @@ class CareerWorkflowRetrieveTool(_CareerTool):
                 batch_size=knowledge_config.embedding_batch_size,
             )
             self._retriever: HybridKnowledgeRetriever | None = HybridKnowledgeRetriever(
-                self._knowledge_store, provider
+                self._knowledge_store,
+                provider,
+                query_rewrite_enabled=knowledge_config.query_rewrite.enabled,
+                max_rewritten_queries=knowledge_config.query_rewrite.max_rewritten_queries,
+                query_rewriter=build_configured_query_rewriter(knowledge_config.query_rewrite),
+                rerank=knowledge_config.rerank,
             )
         else:
             self._retriever = None
@@ -346,10 +354,16 @@ class CareerWorkflowRetrieveTool(_CareerTool):
                 False,
             )
         try:
+            mode = (
+                "hybrid"
+                if self._knowledge_config.retrieval_mode == "hybrid"
+                else "vector"
+            )
             fused = await self._retriever.search(
                 query,
                 limit=self._knowledge_config.candidate_results,
                 candidate_limit=self._knowledge_config.candidate_results,
+                mode=mode,
             )
             return [item.result for item in fused], False
         except EmbeddingProviderError:

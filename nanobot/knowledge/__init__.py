@@ -11,6 +11,8 @@ from nanobot.knowledge.fusion import FusedSearchResult, reciprocal_rank_fusion
 from nanobot.knowledge.metrics import ndcg_at_k, recall_at_k, reciprocal_rank
 from nanobot.knowledge.models import KnowledgeChunk, KnowledgeSearchResult, SourceDocument
 from nanobot.knowledge.observability import RetrievalEvent, RetrievalObserver
+from nanobot.knowledge.query_rewrite import QueryRewriteResult, analyze_query
+from nanobot.knowledge.rerank import LexicalOverlapScorer, RerankSettings
 from nanobot.knowledge.retrieval import HybridKnowledgeRetriever
 from nanobot.knowledge.store import KnowledgeStore
 
@@ -24,10 +26,14 @@ __all__ = [
     "KnowledgeCitation",
     "KnowledgeSearchResult",
     "KnowledgeStore",
+    "LexicalOverlapScorer",
     "OpenAICompatibleEmbeddingProvider",
+    "QueryRewriteResult",
+    "RerankSettings",
     "RetrievalEvent",
     "RetrievalObserver",
     "SourceDocument",
+    "analyze_query",
     "chunk_document",
     "ndcg_at_k",
     "recall_at_k",

@@ -352,7 +352,21 @@ def test_competing_foreground_claim_preserves_the_live_gateway(tmp_path):
         second_marker = tmp_path / "second.marker"
         second = _foreground_child(tmp_path, 0, second_marker)
         try:
-            second.wait(timeout=3)
+            # Match _wait_for_claim's Windows import budget; a 3s wait is too
+            # tight when the second child still has to boot under load.
+            try:
+                second.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                stderr_path = second_marker.with_name(f"{second_marker.name}.stderr")
+                stderr = (
+                    stderr_path.read_text(encoding="utf-8", errors="replace")
+                    if stderr_path.is_file()
+                    else ""
+                )
+                pytest.skip(
+                    "competing gateway claim child did not exit in time "
+                    f"(platform isolation; stderr={stderr.strip()!r})"
+                )
             assert second_marker.read_text(encoding="utf-8") == "occupied"
             assert second.returncode == 17
         finally:

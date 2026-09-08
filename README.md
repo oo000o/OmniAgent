@@ -28,7 +28,7 @@ OmniAgent 会完成以下流程：
 
 ## 核心能力
 
-- **私有知识库**：本地文档解析、SQLite FTS5/BM25、向量检索、RRF 排名融合与稳定引用。
+- **私有知识库**：本地文档解析、SQLite FTS5/BM25、向量检索、RRF 排名融合、条件 Query Rewrite、Cross-Encoder Rerank（可关闭）与稳定引用。
 - **任务 MCP**：创建、查询、分页筛选、更新与取消；使用 Pydantic 约束工具参数。
 - **可靠写操作**：幂等键防重复、乐观锁防覆盖、高风险取消操作要求显式确认。
 - **跨端连续性**：WebUI 与飞书共享持久化知识和任务状态；飞书使用长连接，无需公网 IP。
@@ -77,7 +77,8 @@ Tool 成功 → Checkpoint 写入失败 → 重启 → 查询幂等回执 → �
 | 验证项 | 结果 |
 | --- | --- |
 | 确定性离线评测 | **92 / 92** |
-| GitHub Actions | **8 / 8 jobs 通过** |
+| 检索消融语料 | **约 40** 条人工标注 Query（另见 `artifacts/evaluation/retrieval_ablation_latest.json`） |
+| GitHub Actions | **全部门禁通过**（CI 默认关闭 rewrite/rerank，避免拖垮托管 runner） |
 | Python 矩阵 | 3.11、3.14、Windows 3.14 |
 | 前端与终端 | WebUI、Linux TUI、Windows TUI |
 | 容器 | 非 root 运行、健康检查、持久化与镜像内评测通过 |
@@ -137,10 +138,22 @@ pytest
 ```
 
 离线评测报告生成在 `artifacts/evaluation/latest.json`，该目录不会提交到 Git。当前
-基线包含 92 条工程回归用例，其中包括 17 条求职工作流成功、边界拒绝和恢复场景，
-8 条运行观测 Trace/聚合场景，以及 7 条故障注入与隐私回归；
-报告还会比较 BM25、向量检索和 RRF 混合检索的 Recall@3、MRR、NDCG@3。CI 使用
-透明的确定性向量夹具，不消耗线上模型额度；生产配置使用魔搭兼容 Embedding API。
+基线包含 92 条工程回归用例；检索链路封版增强另提供消融与本地 benchmark：
+
+```bash
+python -m evaluation.run
+python -m evaluation.run_seal
+```
+
+最终检索链路（`query_rewrite` / `rerank` 可配置开关）：
+
+```text
+Query Analysis → Conditional Rewrite（仅复杂查询）
+  → BM25 + Vector → RRF → Cross-Encoder Rerank → Citation
+```
+
+Rewrite / Rerank 失败时分别回退到原 Query 与 RRF 排序。消融与 P50/P95 数字来自本地
+夹具，**不是 Production SLA**。
 
 更多工程说明：
 

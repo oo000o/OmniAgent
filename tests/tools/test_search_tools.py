@@ -373,7 +373,7 @@ async def test_grep_searches_pptx_with_slide_locator(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_grep_searches_pdf_with_page_locator(tmp_path: Path) -> None:
-    import fitz
+    fitz = pytest.importorskip("fitz")
 
     pdf_path = tmp_path / "notes.pdf"
     document = fitz.open()

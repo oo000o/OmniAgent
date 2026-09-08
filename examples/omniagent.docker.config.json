@@ -57,7 +57,7 @@
       "enable": true,
       "databasePath": ".nanobot/knowledge.db",
       "defaultResults": 5,
-      "retrievalMode": "hybrid",
+      "retrievalMode": "vector",
       "candidateResults": 20,
       "embeddingModel": "Qwen/Qwen3-Embedding-0.6B",
       "embeddingApiKey": "${MODELSCOPE_API_KEY}",

@@ -38,8 +38,9 @@ Runtime Events ─> Run Store ─> WebUI 运行详情（耗时、Token、工具�
 
 ## 核心设计
 
-- 混合检索：使用 SQLite FTS5/BM25 与向量相似度检索，通过 RRF 合并排名，并返回
-  稳定的文件名、字符区间和引用编号。
+- 混合检索：使用 SQLite FTS5/BM25 与向量相似度检索，通过 RRF 合并排名；可选条件
+  Query Rewrite（仅 complex/vague/multi_intent）与 Cross-Encoder Rerank（对 RRF
+  Top-N 精排），失败时分别回退原 Query 与 RRF 序；返回稳定引用编号。
 - 工具边界：任务能力封装为独立 stdio MCP 服务，提供创建、查询、更新、取消工具；
   参数由 Pydantic 校验。
 - 可靠写入：创建与变更支持幂等键，更新采用乐观锁，取消操作需要显式确认，降低
