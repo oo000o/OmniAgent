@@ -77,11 +77,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.python_required == 'true'
     runs-on: ${{ matrix.os }}
-    # The coverage leg also runs Ruff, strict BasedPyright, the full 6.8k+
-    # test suite, and the evaluation gate. Serial coverage needs more headroom
-    # than the parallel legs; keep a bounded timeout without cancelling
-    # healthy runs on slower hosted runners.
-    timeout-minutes: 60
+    # The strict leg also runs Ruff, BasedPyright, the full suite, and the
+    # evaluation gate. Keep a bounded timeout without cancelling healthy runs
+    # on slower hosted runners.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -91,11 +90,15 @@ jobs:
             python-version: "3.11"
             coverage: false
             pytest_args: ""
-          - name: latest, 3.14 + coverage
+          # "coverage" here means the strict Linux leg (lint/types/eval), not
+          # pytest --cov. Full-suite --cov repeatedly gets ubuntu-latest killed
+          # with "The operation was canceled" (no FAILED lines); keep fail_under
+          # for local `pytest --cov` instead.
+          - name: latest, 3.14
             os: ubuntu-latest
             python-version: "3.14"
             coverage: true
-            pytest_args: ""
+            pytest_args: "-n auto --dist loadfile"
           - name: Windows, 3.14
             os: windows-latest
             python-version: "3.14"
@@ -138,15 +141,11 @@ jobs:
         if: matrix.coverage
         run: uv run --no-sync basedpyright
 
-      # Isolation: run coverage serially (no xdist). Parallel workers + cov
-      # repeatedly ended at ~99% with GitHub "The operation was canceled"
-      # (likely runner OOM). Outer timeout still bounds a wedged session.
-      - name: Run tests with coverage
+      - name: Run tests
         if: matrix.coverage
         run: >-
-          timeout --signal=INT --kill-after=60s 50m
           uv run --no-sync python -m pytest
-          --cov=nanobot --cov-report=term-missing:skip-covered
+          ${{ matrix.pytest_args }}
           --durations=25 --durations-min=1.0
 
       - name: Run OmniAgent evaluation gate
