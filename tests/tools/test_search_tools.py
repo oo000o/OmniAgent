@@ -142,14 +142,15 @@ async def test_find_files_scan_keeps_event_loop_responsive(
     monkeypatch.setattr(tool, "_iter_paths", blocking_iter_paths)
     task = asyncio.create_task(tool.execute(path="."))
     try:
-        assert await asyncio.to_thread(started.wait, 0.5)
+        # Under Windows xdist the worker thread can take >0.5s to start.
+        assert await asyncio.to_thread(started.wait, 2.0)
         for _ in range(3):
             await asyncio.sleep(0.01)
         assert not task.done()
     finally:
         release.set()
 
-    assert await asyncio.wait_for(task, timeout=0.5) == "match.txt"
+    assert await asyncio.wait_for(task, timeout=2.0) == "match.txt"
 
 
 @pytest.mark.asyncio

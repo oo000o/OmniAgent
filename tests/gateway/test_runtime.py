@@ -125,7 +125,12 @@ def _wait_for_claim(
             detail = marker.read_text(encoding="utf-8")
             if detail.startswith("claimed:"):
                 return int(detail.partition(":")[2])
-            pytest.fail(f"gateway claim failed: returncode={process.poll()}, {detail}")
+            # An empty marker can appear before the child finishes writing;
+            # keep waiting unless the child reported a concrete failure.
+            if detail.strip():
+                pytest.fail(
+                    f"gateway claim failed: returncode={process.poll()}, {detail}"
+                )
         if process.poll() is not None:
             break
         time.sleep(0.01)
