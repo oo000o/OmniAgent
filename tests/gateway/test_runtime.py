@@ -87,27 +87,39 @@ def _foreground_child(
     env = os.environ.copy()
     root = str(Path(__file__).resolve().parents[2])
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (root, env.get("PYTHONPATH"))))
-    return subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            _FOREGROUND_CHILD,
-            str(runtime_dir),
-            str(duration_s),
-            str(marker),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-        start_new_session=os.name != "nt",
-    )
+    # Keep child diagnostics for slow Windows CI hosts without risking a PIPE
+    # deadlock while the claimed process sleeps with the lock held.
+    stderr_path = marker.with_name(f"{marker.name}.stderr")
+    stderr_file = stderr_path.open("w", encoding="utf-8")
+    try:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                _FOREGROUND_CHILD,
+                str(runtime_dir),
+                str(duration_s),
+                str(marker),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+            env=env,
+            start_new_session=os.name != "nt",
+            text=True,
+        )
+    finally:
+        stderr_file.close()
 
 
 def _wait_for_claim(
     process: subprocess.Popen[str],
     marker: Path,
+    *,
+    timeout_s: float = 15.0,
 ) -> int:
-    deadline = time.monotonic() + 3
+    # Windows CI under xdist can spend several seconds importing nanobot before
+    # the child writes the claim marker; keep this deadline above that floor.
+    deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if marker.exists():
             detail = marker.read_text(encoding="utf-8")
@@ -118,7 +130,14 @@ def _wait_for_claim(
             break
         time.sleep(0.01)
     detail = marker.read_text(encoding="utf-8") if marker.exists() else "no marker"
-    pytest.fail(f"gateway claim failed: returncode={process.poll()}, {detail}")
+    stderr_path = marker.with_name(f"{marker.name}.stderr")
+    stderr = (
+        stderr_path.read_text(encoding="utf-8", errors="replace")
+        if stderr_path.is_file()
+        else ""
+    )
+    suffix = f", stderr={stderr.strip()!r}" if stderr.strip() else ""
+    pytest.fail(f"gateway claim failed: returncode={process.poll()}, {detail}{suffix}")
 
 
 class _ManagedForegroundChildRuntime(GatewayRuntime):
