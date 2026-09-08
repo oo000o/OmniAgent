@@ -137,11 +137,17 @@ jobs:
         if: matrix.coverage
         run: uv run --no-sync basedpyright
 
+      # Cap xdist workers under coverage: `-n auto` on the full suite can peak
+      # memory near the end and get the hosted runner killed, which GitHub
+      # reports as "The operation was canceled" rather than a test failure.
+      # Bound the session too so a wedged controller cannot sit until the job
+      # timeout with the same cancelled annotation.
       - name: Run tests with coverage
         if: matrix.coverage
         run: >-
+          timeout --signal=INT --kill-after=60s 20m
           uv run --no-sync python -m pytest
-          -n auto --dist loadfile
+          -n 4 --dist loadfile
           --cov=nanobot --cov-report=term-missing:skip-covered
           --durations=25 --durations-min=1.0
 
