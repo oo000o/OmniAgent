@@ -42,10 +42,15 @@ def _run_mcp_server(port: int, ready_event: multiprocessing.Event) -> None:
     """FastMCP server target for ``multiprocessing.Process``.
 
     The server exposes a single ``greet`` tool and terminates idle sessions
-    after ``_IDLE_TIMEOUT_SECONDS``.
+    after ``_IDLE_TIMEOUT_SECONDS``. MCP SDK 1.30+ keeps a GET notification
+    stream open, which would otherwise prevent the idle timeout this fixture
+    needs; decline that optional stream and keep POST/DELETE/lifespan.
     """
+    import uvicorn
     from mcp.server.fastmcp import FastMCP
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from starlette.responses import Response
+    from starlette.types import Receive, Scope, Send
 
     mcp = FastMCP("IdleTimeoutDemo", json_response=True, port=port)
 
@@ -62,8 +67,20 @@ def _run_mcp_server(port: int, ready_event: multiprocessing.Event) -> None:
         session_idle_timeout=_IDLE_TIMEOUT_SECONDS,
     )
 
+    app = mcp.streamable_http_app()
+
+    async def without_notification_stream(
+        scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        if scope["type"] == "http" and scope["method"] == "GET":
+            await Response(status_code=405, headers={"Allow": "POST, DELETE"})(
+                scope, receive, send
+            )
+        else:
+            await app(scope, receive, send)
+
     ready_event.set()
-    mcp.run(transport="streamable-http")
+    uvicorn.run(without_notification_stream, host="127.0.0.1", port=port)
 
 
 async def _wait_for_server(url: str, timeout: float = 10.0) -> bool:
@@ -175,6 +192,7 @@ async def test_mcp_reconnect_after_session_timeout(tmp_path, mcp_server_url):
 
     output = await asyncio.create_task(tool.execute(name="second"))
     assert "Hello, second" in output
+    assert registry.get("mcp_repro_greet") is not tool
 
     await asyncio.create_task(provider.aclose())
 
