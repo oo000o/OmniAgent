@@ -105,7 +105,8 @@ jobs:
             coverage: false
             # Real PowerShell/process-tree tests run serially below. Keep
             # them out of xdist so workers never share a Windows console.
-            pytest_args: "-n 2 --dist loadfile --ignore=tests/tools/test_exec_platform.py"
+            # Gateway WebUI smoke also starts real processes and rebinds ports.
+            pytest_args: "-n 2 --dist loadfile --ignore=tests/tools/test_exec_platform.py --ignore=tests/webui/test_gateway_webui_smoke.py"
 
     steps:
       - uses: actions/checkout@v4
@@ -174,6 +175,7 @@ jobs:
         run: >-
           uv run --no-sync python -m pytest
           tests/tools/test_exec_platform.py
+          tests/webui/test_gateway_webui_smoke.py
           --durations=25 --durations-min=1.0
 
   webui:

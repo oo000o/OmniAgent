@@ -113,7 +113,9 @@ def _get_bootstrap(url: str) -> dict:
 
 
 def _wait_for_bootstrap(base_url: str, process: subprocess.Popen[bytes], log_path: Path) -> dict:
-    deadline = time.monotonic() + 20
+    # Windows CI gateway cold start can spend 15s+ registering tools before the
+    # WebUI listener accepts connections; keep this above that floor.
+    deadline = time.monotonic() + 45
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -125,6 +127,20 @@ def _wait_for_bootstrap(base_url: str, process: subprocess.Popen[bytes], log_pat
             time.sleep(0.2)
     logs = log_path.read_text(encoding="utf-8", errors="replace")
     raise AssertionError(f"gateway did not start; last_error={last_error!r}\n{logs}")
+
+
+def _wait_for_port_free(port: int, *, timeout_s: float = 20.0) -> None:
+    """Wait until a local TCP port can be rebound after a gateway stop."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+                return
+            except OSError:
+                time.sleep(0.1)
+    raise AssertionError(f"port {port} remained occupied after gateway stop")
 
 
 async def _recv_until(ws: websockets.WebSocketClientProtocol, event: str) -> dict:
@@ -235,6 +251,8 @@ def test_gateway_restart_restores_a_completed_answer_without_replaying_model(
         _wait_for_bootstrap(base_url, first, first_log)
     finally:
         _stop_gateway(first)
+    _wait_for_port_free(ws_port)
+    _wait_for_port_free(gateway_port)
 
     sessions_root = tmp_path / "sessions"
     sessions = SessionManager(workspace, sessions_root=sessions_root)
